@@ -9,7 +9,7 @@
 #include "common/Perf.h"
 
 using namespace vtlb_private;
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(PCSX2_IOS)
 using namespace x86Emitter;
 #endif
 

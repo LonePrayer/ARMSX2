@@ -140,7 +140,7 @@ std::optional<float> WindowInfo::QueryRefreshRateForWindow(const WindowInfo& wi)
 	return ret;
 }
 
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && !defined(PCSX2_IOS)
 
 #include "common/CocoaTools.h"
 

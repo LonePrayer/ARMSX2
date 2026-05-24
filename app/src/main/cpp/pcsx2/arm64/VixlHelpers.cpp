@@ -344,7 +344,7 @@ bool armIsCalleeSavedRegister(int reg)
 
 bool armIsCallerSaved(int id)
 {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(PCSX2_IOS)
     // gpr registers callee saved => r19 ~ r28
     // 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
     return (id <= 15);
@@ -361,7 +361,7 @@ bool armIsCallerSaved(int id)
 
 bool armIsCallerSavedXmm(int id)
 {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(PCSX2_IOS)
     // vector registers callee saved => d8 ~ d15
     // d9,d10,d11,d12,d13,d14,d15
     return (id < 9);

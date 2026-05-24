@@ -189,11 +189,17 @@ GSMTLDevice::GSMTLDevice(MRCOwned<id<MTLDevice>> dev)
 	if (char* env = getenv("MTL_SLOW_COLOR_COMPRESSION"))
 		features.slow_color_compression = env[0] == '1' || env[0] == 'y' || env[0] == 'Y';
 	else
+#if defined(PCSX2_IOS)
+		features.slow_color_compression = false;
+#else
 		features.slow_color_compression = [[dev name] containsString:@"AMD"] || [[dev name] isEqualToString:@"Intel HD Graphics 4000"];
+#endif
 
 	features.max_texsize = 8192;
+#if !defined(PCSX2_IOS)
 	if ([dev supportsFeatureSet:MTLFeatureSet_macOS_GPUFamily1_v1])
 		features.max_texsize = 16384;
+#endif
 	if (@available(macOS 10.15, iOS 13.0, *))
 		if ([dev supportsFamily:MTLGPUFamilyApple3])
 			features.max_texsize = 16384;

@@ -279,7 +279,7 @@ set(PCSX2_WARNINGS ${DEFAULT_WARNINGS})
 # MacOS-specific things
 #-------------------------------------------------------------------------------
 
-if(NOT CMAKE_GENERATOR MATCHES "Xcode")
+if(APPLE AND NOT IOS AND NOT CMAKE_GENERATOR MATCHES "Xcode")
 	# Assume Xcode builds aren't being used for distribution
 	# Helpful because Xcode builds don't build multiple metallibs for different macOS versions
 	# Also helpful because Xcode's interactive shader debugger requires apps be built for the latest macOS

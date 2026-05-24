@@ -20,6 +20,9 @@ target_link_libraries(PCSX2 PRIVATE PCSX2_FLAGS)
 
 target_compile_features(PCSX2_FLAGS INTERFACE cxx_std_20)
 target_compile_definitions(PCSX2_FLAGS INTERFACE "${PCSX2_DEFS}")
+if(IOS)
+	target_compile_definitions(PCSX2_FLAGS INTERFACE PCSX2_IOS=1)
+endif()
 target_compile_options(PCSX2_FLAGS INTERFACE "${PCSX2_WARNINGS}")
 
 # Check that people use the good file
@@ -327,7 +330,13 @@ set(pcsx2DEV9Sources
 	DEV9/flash.cpp
 	DEV9/pcap_io.cpp
 	DEV9/net.cpp
+)
+
+if(IOS)
+	set(pcsx2DEV9Sources
+		DEV9/DEV9Unavailable.cpp
 	)
+endif()
 
 # DEV9 headers
 set(pcsx2DEV9Headers
@@ -837,8 +846,11 @@ set(pcsx2DebugToolsHeaders
 set(pcsx2HostSources
 	Host/AudioStream.cpp
 	Host/CubebAudioStream.cpp
-	Host/SDLAudioStream.cpp
-	Host/OboeAudioStream.cpp)
+	Host/SDLAudioStream.cpp)
+
+if(ANDROID)
+	list(APPEND pcsx2HostSources Host/OboeAudioStream.cpp)
+endif()
 
 set(pcsx2HostHeaders
 	Host/AudioStream.h
@@ -1059,7 +1071,30 @@ set(pcsx2arm64Sources
 	arm64/Vif_Dynarec.cpp
 	arm64/Vif_UnpackNEON.cpp
 	arm64/VixlHelpers.cpp
-#	arm64/RecStubs.cpp
+	arm64/RecStubs.cpp
+	x86/BaseblockEx.cpp
+	x86/iCOP0.cpp
+	x86/iCore.cpp
+	x86/iFPU.cpp
+	x86/iFPUd.cpp
+	x86/iMMI.cpp
+	x86/iR3000A.cpp
+	x86/iR3000Atables.cpp
+	x86/iR5900Analysis.cpp
+	x86/iR5900Misc.cpp
+	x86/ix86-32/iCore.cpp
+	x86/ix86-32/iR5900.cpp
+	x86/ix86-32/iR5900Arit.cpp
+	x86/ix86-32/iR5900AritImm.cpp
+	x86/ix86-32/iR5900Branch.cpp
+	x86/ix86-32/iR5900Jump.cpp
+	x86/ix86-32/iR5900LoadStore.cpp
+	x86/ix86-32/iR5900Move.cpp
+	x86/ix86-32/iR5900MultDiv.cpp
+	x86/ix86-32/iR5900Shift.cpp
+	x86/ix86-32/iR5900Templates.cpp
+	x86/ix86-32/recVTLB.cpp
+	x86/microVU.cpp
 	)
 
 set(pcsx2arm64Headers
@@ -1078,13 +1113,13 @@ set(pcsx2LTOSources
 	${pcsx2GSHeaders}
 )
 
-#if(_M_X86)
+if(_M_X86)
 	list(APPEND pcsx2LTOSources ${pcsx2x86Sources} ${pcsx2x86Headers})
 #	target_link_libraries(PCSX2_FLAGS INTERFACE zydis)
-#elseif(_M_ARM64)
+elseif(_M_ARM64)
 	list(APPEND pcsx2LTOSources ${pcsx2arm64Sources} ${pcsx2arm64Headers})
 	target_link_libraries(PCSX2_FLAGS INTERFACE vixl)
-#endif()
+endif()
 
 if(LTO_PCSX2_CORE)
 	add_library(PCSX2_LTO ${pcsx2LTOSources})
@@ -1147,8 +1182,8 @@ endif()
 
 target_sources(PCSX2 PRIVATE ${pcsx2USBSources} ${pcsx2USBHeaders})
 
-if(APPLE OR BSD)
-	if(APPLE)
+if((APPLE AND NOT IOS) OR BSD)
+	if(APPLE AND NOT IOS)
 		target_sources(PCSX2 PRIVATE
 			${pcsx2OSXSources})
 	else()
@@ -1232,6 +1267,17 @@ elseif(ANDROID)
 		android
 		${log-lib}
 	)
+elseif(IOS)
+	target_link_directories(PCSX2 PRIVATE ../3rdparty/libs)
+	target_link_libraries(PCSX2_FLAGS INTERFACE
+		"-framework Foundation"
+		"-framework UIKit"
+		"-framework QuartzCore"
+		"-framework Metal"
+		"-framework GameController"
+		"-framework CoreGraphics"
+		"-framework CoreText"
+	)
 else()
 	target_link_libraries(PCSX2_FLAGS INTERFACE
 		PCAP::PCAP
@@ -1244,7 +1290,7 @@ if(_M_X86)
 	target_compile_definitions(PCSX2_FLAGS INTERFACE XBYAK_NO_EXCEPTION)
 endif()
 
-if(ANDROID)
+if(ANDROID OR IOS)
 	target_include_directories(PCSX2_FLAGS INTERFACE
 		"${CMAKE_CURRENT_SOURCE_DIR}"
 		"${CMAKE_BINARY_DIR}/pcsx2"
@@ -1299,7 +1345,7 @@ if (NOT ANDROID)
 force_include_last(PCSX2_FLAGS "/(usr|local)/include/?$")
 endif()
 
-if (APPLE)
+if (APPLE AND NOT IOS)
 	find_library(APPKIT_LIBRARY AppKit)
 	find_library(IOKIT_LIBRARY IOKit)
 	find_library(METAL_LIBRARY Metal)

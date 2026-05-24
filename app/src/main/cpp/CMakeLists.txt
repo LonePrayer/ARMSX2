@@ -11,7 +11,7 @@ if(${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_BINARY_DIR})
 endif()
 
 # Project Name
-project(Pcsx2 C CXX)
+project(Pcsx2 C CXX OBJC OBJCXX)
 
 # Variable to check that people use the good file
 set(TOP_CMAKE_WAS_SOURCED TRUE)
@@ -60,6 +60,9 @@ add_subdirectory(common)
 
 # make pcsx2
 add_subdirectory(pcsx2)
+if(IOS)
+	add_subdirectory(ios)
+endif()
 #add_subdirectory(pcsx2-qt)
 
 # Updater is Windows only for now.

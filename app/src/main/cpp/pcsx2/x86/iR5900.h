@@ -15,7 +15,7 @@
 // On ARM64 builds (including macOS Apple Silicon), this is defined in
 // arm64/VixlHelpers.h to an AArch64 register. Only define the x86 variant
 // when we're not on Android and not compiling for ARM64.
-#if !defined(__ANDROID__) && !defined(__aarch64__) && !defined(_M_ARM64)
+#if !defined(__ANDROID__) && !defined(PCSX2_IOS) && !defined(__aarch64__) && !defined(_M_ARM64)
 #define RFASTMEMBASE x86Emitter::rbp
 #endif
 

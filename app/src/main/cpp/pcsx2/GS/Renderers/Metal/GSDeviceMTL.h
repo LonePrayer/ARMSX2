@@ -17,7 +17,11 @@
 #include "GS/GS.h"
 #include "GSMTLDeviceInfo.h"
 #include "GSMTLSharedHeader.h"
+#if defined(PCSX2_IOS)
+#include <UIKit/UIKit.h>
+#else
 #include <AppKit/AppKit.h>
+#endif
 #include <Metal/Metal.h>
 #include <QuartzCore/QuartzCore.h>
 #include <atomic>
@@ -222,7 +226,11 @@ public:
 	MTLResourceOptions m_resource_options_shared_wc;
 
 	// Previously in MetalHostDisplay.
+#if defined(PCSX2_IOS)
+	MRCOwned<UIView*> m_view;
+#else
 	MRCOwned<NSView*> m_view;
+#endif
 	MRCOwned<CAMetalLayer*> m_layer;
 	MRCOwned<id<CAMetalDrawable>> m_current_drawable;
 	MRCOwned<MTLRenderPassDescriptor*> m_pass_desc;

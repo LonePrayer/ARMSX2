@@ -29,6 +29,22 @@ GSDevice* MakeGSDeviceMTL()
 std::vector<GSAdapterInfo> GetMetalAdapterList()
 { @autoreleasepool {
 	std::vector<GSAdapterInfo> list;
+#if defined(PCSX2_IOS)
+	id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+	if (dev)
+	{
+		GSAdapterInfo ai;
+		ai.name = [[dev name] UTF8String];
+		ai.max_texture_size = 8192;
+		if (@available(iOS 13.0, *))
+		{
+			if ([dev supportsFamily:MTLGPUFamilyApple3])
+				ai.max_texture_size = 16384;
+		}
+		ai.max_upscale_multiplier = GSGetMaxUpscaleMultiplier(ai.max_texture_size);
+		list.push_back(std::move(ai));
+	}
+#else
 	auto devs = MRCTransfer(MTLCopyAllDevices());
 	for (id<MTLDevice> dev in devs.Get())
 	{
@@ -45,6 +61,7 @@ std::vector<GSAdapterInfo> GetMetalAdapterList()
 		ai.max_upscale_multiplier = GSGetMaxUpscaleMultiplier(ai.max_texture_size);
 		list.push_back(std::move(ai));
 	}
+#endif
 	return list;
 }}
 
@@ -765,16 +782,27 @@ void GSDeviceMTL::AttachSurfaceOnMainThread()
 	m_layer = MRCRetain([CAMetalLayer layer]);
 	[m_layer setDrawableSize:CGSizeMake(m_window_info.surface_width, m_window_info.surface_height)];
 	[m_layer setDevice:m_dev.dev];
+#if defined(PCSX2_IOS)
+	m_view = MRCRetain((__bridge UIView*)m_window_info.window_handle);
+	[m_view.Get() setContentScaleFactor:UIScreen.mainScreen.scale];
+	[m_layer setFrame:[m_view.Get() bounds]];
+	[[m_view.Get() layer] addSublayer:m_layer];
+#else
 	m_view = MRCRetain((__bridge NSView*)m_window_info.window_handle);
 	[m_view setWantsLayer:YES];
 	[m_view setLayer:m_layer];
+#endif
 }
 
 void GSDeviceMTL::DetachSurfaceOnMainThread()
 {
 	pxAssert([NSThread isMainThread]);
+#if defined(PCSX2_IOS)
+	[m_layer removeFromSuperlayer];
+#else
 	[m_view setLayer:nullptr];
 	[m_view setWantsLayer:NO];
+#endif
 	m_view = nullptr;
 	m_layer = nullptr;
 }
@@ -852,12 +880,16 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 		return false;
 
 	NSString* ns_adapter_name = [NSString stringWithUTF8String:GSConfig.Adapter.c_str()];
+#if defined(PCSX2_IOS)
+	m_dev = GSMTLDevice(MRCTransfer(MTLCreateSystemDefaultDevice()));
+#else
 	auto devs = MRCTransfer(MTLCopyAllDevices());
 	for (id<MTLDevice> dev in devs.Get())
 	{
 		if ([[dev name] isEqualToString:ns_adapter_name])
 			m_dev = GSMTLDevice(MRCRetain(dev));
 	}
+#endif
 	if (!m_dev.dev)
 	{
 		if (GSConfig.Adapter == GetDefaultAdapter())
@@ -908,7 +940,9 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 
 		// Metal does not support mailbox.
 		m_vsync_mode = (m_vsync_mode == GSVSyncMode::Mailbox) ? GSVSyncMode::FIFO : m_vsync_mode;
+#if !defined(PCSX2_IOS)
 		[m_layer setDisplaySyncEnabled:m_vsync_mode == GSVSyncMode::FIFO];
+#endif
 	}
 	else
 	{
@@ -1278,6 +1312,9 @@ void GSDeviceMTL::ResizeWindow(s32 new_window_width, s32 new_window_height, floa
 	@autoreleasepool
 	{
 		[m_layer setDrawableSize:CGSizeMake(new_window_width, new_window_height)];
+#if defined(PCSX2_IOS)
+		[m_layer setFrame:[m_view.Get() bounds]];
+#endif
 	}
 }
 
@@ -1364,8 +1401,10 @@ void GSDeviceMTL::EndPresent()
 				{
 					[[MTLCaptureManager sharedCaptureManager] stopCapture];
 					Console.WriteLn("Metal Trace Capture to /tmp/PCSX2MTLCapture.gputrace finished");
+#if !defined(PCSX2_IOS)
 					[[NSWorkspace sharedWorkspace] selectFile:path
 					                 inFileViewerRootedAtPath:@"/tmp/"];
+#endif
 				}
 			}
 			else if (s_capture_next)
@@ -1409,7 +1448,9 @@ void GSDeviceMTL::SetVSyncMode(GSVSyncMode mode, bool allow_present_throttle)
 		return;
 
 	m_vsync_mode = (mode == GSVSyncMode::Mailbox) ? GSVSyncMode::FIFO : mode;
+#if !defined(PCSX2_IOS)
 	[m_layer setDisplaySyncEnabled:m_vsync_mode == GSVSyncMode::FIFO];
+#endif
 }
 
 bool GSDeviceMTL::SetGPUTimingEnabled(bool enabled)
@@ -1944,9 +1985,13 @@ void GSDeviceMTL::MRESetSampler(SamplerSelector sel)
 
 static void textureBarrier(id<MTLRenderCommandEncoder> enc)
 {
+#if !defined(PCSX2_IOS)
 	[enc memoryBarrierWithScope:MTLBarrierScopeRenderTargets
 	                afterStages:MTLRenderStageFragment
 	               beforeStages:MTLRenderStageFragment];
+#else
+	(void)enc;
+#endif
 }
 
 void GSDeviceMTL::MRESetTexture(GSTexture* tex, int pos)

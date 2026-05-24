@@ -6,7 +6,7 @@
 #include "iR5900.h"
 #include "iFPU.h"
 
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(PCSX2_IOS)
 using namespace x86Emitter;
 #endif
 

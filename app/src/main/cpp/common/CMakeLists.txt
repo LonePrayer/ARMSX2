@@ -122,6 +122,45 @@ if(_M_X86)
 		emitter/x86emitter.h
 		emitter/x86types.h
 	)
+elseif(_M_ARM64)
+	target_sources(common PRIVATE
+		emitter/avx.cpp
+		emitter/bmi.cpp
+		emitter/fpu.cpp
+		emitter/groups.cpp
+		emitter/jmp.cpp
+		emitter/legacy.cpp
+		emitter/legacy_sse.cpp
+		emitter/movs.cpp
+		emitter/simd.cpp
+		emitter/x86emitter.cpp
+	)
+
+	target_sources(common PRIVATE
+		emitter/implement/dwshift.h
+		emitter/implement/group1.h
+		emitter/implement/group2.h
+		emitter/implement/group3.h
+		emitter/implement/helpers.h
+		emitter/implement/incdec.h
+		emitter/implement/jmpcall.h
+		emitter/implement/movs.h
+		emitter/implement/simd_arithmetic.h
+		emitter/implement/simd_comparisons.h
+		emitter/implement/simd_helpers.h
+		emitter/implement/simd_moremovs.h
+		emitter/implement/simd_shufflepack.h
+		emitter/implement/simd_templated_helpers.h
+		emitter/implement/test.h
+		emitter/implement/xchg.h
+		emitter/instructions.h
+		emitter/internal.h
+		emitter/legacy_instructions.h
+		emitter/legacy_internal.h
+		emitter/legacy_types.h
+		emitter/x86emitter.h
+		emitter/x86types.h
+	)
 else()
 	target_sources(common PRIVATE
 		emitter/x86emitter.cpp
@@ -146,6 +185,17 @@ if(WIN32)
 		WIL::WIL
 		winmm
 		pathcch
+	)
+elseif(IOS)
+	target_sources(common PRIVATE
+		Darwin/DarwinThreads.cpp
+		IOS/IOSMisc.cpp
+	)
+	target_compile_definitions(common PRIVATE PCSX2_IOS=1)
+	target_compile_options(common PRIVATE -fobjc-arc)
+	target_link_options(common PRIVATE -fobjc-link-runtime)
+	target_link_libraries(common PRIVATE
+		"-framework Foundation"
 	)
 elseif(APPLE)
 	target_sources(common PRIVATE
@@ -198,7 +248,11 @@ if (USE_GCC AND CMAKE_INTERPROCEDURAL_OPTIMIZATION)
 	set_source_files_properties(FastJmp.cpp PROPERTIES COMPILE_FLAGS -fno-lto)
 endif()
 
-if(NOT WIN32)
+if(IOS)
+	target_sources(common PRIVATE
+		HTTPDownloaderUnavailable.cpp
+	)
+elseif(NOT WIN32)
 	# libcurl-based HTTPDownloader
 	target_sources(common PRIVATE
 		HTTPDownloaderCurl.cpp
@@ -218,6 +272,13 @@ if(ANDROID)
 		${LIBC_LIBRARIES}
 		jpeg
 		png16
+		webp
+	)
+elseif(IOS)
+	target_link_libraries(common PRIVATE
+		${LIBC_LIBRARIES}
+		/Users/sb/project/Cemu/build-ios/vcpkg_installed/arm64-ios/lib/libjpeg.a
+		/Users/sb/project/Cemu/build-ios/vcpkg_installed/arm64-ios/lib/libpng16.a
 		webp
 	)
 else()

@@ -36,6 +36,24 @@ namespace a64 = vixl::aarch64;
 #define RDSCRATCH3 a64::d29
 #define RSSCRATCH3 a64::s29
 
+static const a64::VRegister& xmm0 = a64::q0;
+static const a64::VRegister& xmm1 = a64::q1;
+static const a64::VRegister& xmm2 = a64::q2;
+static const a64::VRegister& xmm3 = a64::q3;
+static const a64::VRegister& xmm4 = a64::q4;
+static const a64::VRegister& xmm5 = a64::q5;
+static const a64::VRegister& xmm6 = a64::q6;
+static const a64::VRegister& xmm7 = a64::q7;
+static const a64::VRegister& xmm8 = a64::q8;
+static const a64::VRegister& xmm9 = a64::q9;
+static const a64::VRegister& xmm10 = a64::q10;
+static const a64::VRegister& xmm11 = a64::q11;
+static const a64::VRegister& xmm12 = a64::q12;
+static const a64::VRegister& xmm13 = a64::q13;
+static const a64::VRegister& xmm14 = a64::q14;
+static const a64::VRegister& xmm15 = a64::q15;
+static constexpr int wordsize = sizeof(sptr);
+
 #define EAX a64::w0
 #define ECX a64::w1
 #define EDX a64::w2

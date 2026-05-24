@@ -4146,7 +4146,7 @@ void VMManager::InitializeDiscordPresence()
 #else
 	(void)0;
 #endif
-#else
+#elif defined(USE_DISCORD_SDK)
 	if (s_discord_presence_active)
 		return;
 
@@ -4155,6 +4155,8 @@ void VMManager::InitializeDiscordPresence()
 	s_discord_presence_active = true;
 
 	UpdateDiscordPresence(true);
+#else
+	(void)0;
 #endif
 }
 
@@ -4190,7 +4192,7 @@ void VMManager::ShutdownDiscordPresence()
 		return;
 	s_discord_presence_active = false;
 #endif
-#else
+#elif defined(USE_DISCORD_SDK)
 	if (!s_discord_presence_active)
 		return;
 
@@ -4198,6 +4200,8 @@ void VMManager::ShutdownDiscordPresence()
 	Discord_RunCallbacks();
 	Discord_Shutdown();
 	s_discord_presence_active = false;
+#else
+	(void)0;
 #endif
 }
 
@@ -4233,7 +4237,7 @@ void VMManager::UpdateDiscordPresence(bool update_session_time)
 	if (update_session_time)
 		s_discord_presence_time_epoch = std::time(nullptr);
 #endif
-#else
+#elif defined(USE_DISCORD_SDK)
 	if (!s_discord_presence_active)
 		return;
 
@@ -4264,6 +4268,8 @@ void VMManager::UpdateDiscordPresence(bool update_session_time)
 
 	Discord_UpdatePresence(&rp);
 	Discord_RunCallbacks();
+#else
+	(void)update_session_time;
 #endif
 }
 
@@ -4281,11 +4287,13 @@ void VMManager::PollDiscordPresence()
 	#else
 	(void)0;
 	#endif
-#else
+#elif defined(USE_DISCORD_SDK)
 	if (!s_discord_presence_active)
 		return;
 
 	Discord_RunCallbacks();
+#else
+	(void)0;
 #endif
 }
 
