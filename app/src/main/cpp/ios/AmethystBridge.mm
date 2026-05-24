@@ -32,6 +32,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -57,6 +58,9 @@ thread_local bool t_on_cpu_thread = false;
 
 #define AMETHYST_EXPORT extern "C" __attribute__((visibility("default")))
 
+static void AppendBridgeLog(const std::string& message);
+static void EnsureDirectory(const std::string& path);
+
 static bool UserBool(NSString* key, bool default_value)
 {
 	id value = [NSUserDefaults.standardUserDefaults objectForKey:key];
@@ -80,12 +84,40 @@ static void SetLastError(std::string error)
 	std::lock_guard lock(s_bridge_mutex);
 	s_last_error = std::move(error);
 	if (!s_last_error.empty())
-		NSLog(@"[ARMSX2] %s", s_last_error.c_str());
+		AppendBridgeLog(s_last_error);
 }
 
 static std::string StringFromCString(const char* value)
 {
 	return value ? std::string(value) : std::string();
+}
+
+static void AppendBridgeLog(const std::string& message)
+{
+	NSLog(@"[ARMSX2] %s", message.c_str());
+
+	NSDateFormatter* formatter = [[NSDateFormatter alloc] init];
+	formatter.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
+	NSString* timestamp = [formatter stringFromDate:NSDate.date];
+	const std::string line = std::string(timestamp.UTF8String) + " [ARMSX2] " + message + "\n";
+
+	if (!s_data_root.empty())
+	{
+		EnsureDirectory(s_data_root + "/Logs");
+		std::ofstream stream(s_data_root + "/Logs/armsx2-amethyst.log", std::ios::app);
+		if (stream)
+			stream << line;
+	}
+
+	NSString* documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+	if (documents.length > 0)
+	{
+		std::string app_log_root = std::string(documents.UTF8String) + "/ps2/Logs";
+		EnsureDirectory(app_log_root);
+		std::ofstream app_stream(app_log_root + "/armsx2-amethyst.log", std::ios::app);
+		if (app_stream)
+			app_stream << line;
+	}
 }
 
 static void EnsureDirectory(const std::string& path)
@@ -361,7 +393,7 @@ static bool InitializeCore(const std::string& data_root, const std::string& reso
 
 	s_data_root = data_root;
 	s_resources_root = resources_root;
-	NSLog(@"[ARMSX2] Initialize data=%s resources=%s", s_data_root.c_str(), s_resources_root.c_str());
+	AppendBridgeLog("Initialize data=" + s_data_root + " resources=" + s_resources_root);
 	EnsureDirectory(s_data_root);
 
 	EmuFolders::AppRoot = s_data_root;
@@ -398,7 +430,7 @@ static void RunVM(std::string iso_path, std::string bios_path)
 	t_on_cpu_thread = true;
 	s_running = true;
 	s_stop_requested = false;
-	NSLog(@"[ARMSX2] RunVM iso=%s bios=%s", iso_path.c_str(), bios_path.c_str());
+	AppendBridgeLog("RunVM iso=" + iso_path + " bios=" + bios_path);
 	ApplyRuntimeSettings(bios_path);
 	EnsureDefaultMemoryCards();
 
@@ -425,7 +457,7 @@ static void RunVM(std::string iso_path, std::string bios_path)
 	}
 
 	VMManager::SetState(VMState::Running);
-	NSLog(@"[ARMSX2] VM running");
+	AppendBridgeLog("VM running");
 	while (!s_stop_requested)
 	{
 		DrainCPUThreadTasks();
@@ -443,7 +475,7 @@ static void RunVM(std::string iso_path, std::string bios_path)
 	DrainCPUThreadTasks();
 	t_on_cpu_thread = false;
 	s_running = false;
-	NSLog(@"[ARMSX2] VM stopped");
+	AppendBridgeLog("VM stopped");
 }
 
 static bool RunVMTaskSync(std::function<bool()> task)
@@ -486,15 +518,16 @@ static bool RunVMTaskSync(std::function<bool()> task)
 
 AMETHYST_EXPORT int ARMSX2AmethystInitialize(const char* data_root, const char* resources_root)
 {
-	std::lock_guard lock(s_bridge_mutex);
 	return InitializeCore(StringFromCString(data_root), StringFromCString(resources_root)) ? 1 : 0;
 }
 
 AMETHYST_EXPORT int ARMSX2AmethystStart(UIView* render_view, const char* iso_path, const char* bios_path)
 {
 	const std::string iso = StringFromCString(iso_path);
-	NSLog(@"[ARMSX2] Start request iso=%s bios=%s initialized=%d running=%d",
-		iso.c_str(), StringFromCString(bios_path).c_str(), s_initialized.load(), s_running.load());
+	AppendBridgeLog("Start request iso=" + iso +
+		" bios=" + StringFromCString(bios_path) +
+		" initialized=" + std::to_string(s_initialized.load()) +
+		" running=" + std::to_string(s_running.load()));
 	if (!s_initialized)
 	{
 		SetLastError("core is not initialized");

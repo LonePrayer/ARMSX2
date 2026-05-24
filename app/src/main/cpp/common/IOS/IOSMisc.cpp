@@ -136,6 +136,15 @@ void* HostSys::Mmap(void* base, size_t size, const PageProtectionMode& mode)
 		flags |= MAP_JIT;
 
 	void* result = mmap(base, size, IOSProt(mode), flags, -1, 0);
+	if (result == MAP_FAILED && mode.CanExecute() && (flags & MAP_JIT))
+	{
+		const int jit_errno = errno;
+		const int fallback_flags = flags & ~MAP_JIT;
+		result = mmap(base, size, IOSProt(mode), fallback_flags, -1, 0);
+		if (result == MAP_FAILED)
+			std::fprintf(stderr, "HostSys::Mmap executable allocation failed: MAP_JIT errno=%d fallback errno=%d size=%zu\n",
+				jit_errno, errno, size);
+	}
 	return result == MAP_FAILED ? nullptr : result;
 }
 
@@ -158,10 +167,22 @@ std::string HostSys::GetFileMappingName(const char* prefix)
 
 void* HostSys::CreateSharedMemory(const char* name, size_t size)
 {
-	const int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
+	int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
+	const bool using_shm = (fd >= 0);
+	if (fd < 0)
+	{
+		const char* tmpdir = std::getenv("TMPDIR");
+		std::string path = fmt::format("{}/pcsx2-shm-XXXXXX", (tmpdir && tmpdir[0] != '\0') ? tmpdir : "/tmp");
+		fd = mkstemp(path.data());
+		if (fd >= 0)
+			unlink(path.c_str());
+	}
 	if (fd < 0)
 		return nullptr;
-	shm_unlink(name);
+
+	if (using_shm)
+		shm_unlink(name);
+
 	if (ftruncate(fd, static_cast<off_t>(size)) < 0)
 	{
 		close(fd);
