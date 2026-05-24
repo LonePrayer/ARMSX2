@@ -308,6 +308,7 @@ static bool PrepareMemoryCardsAtDataRoot(const std::string& data_root)
 	EmuFolders::AppRoot = data_root;
 	EmuFolders::DataRoot = data_root;
 	EmuFolders::MemoryCards = Path::Combine(data_root, "Memcards");
+	NSLog(@"[ARMSX2] Preparing memory cards at %s", EmuFolders::MemoryCards.c_str());
 	EnsureDirectory(EmuFolders::MemoryCards);
 	if (!FileSystem::FileExists(Path::Combine(EmuFolders::MemoryCards, "Mcd001.ps2").c_str()))
 		FileMcd_CreateNewCard("Mcd001.ps2", MemoryCardType::File, MemoryCardFileType::PS2_8MB);
@@ -334,6 +335,7 @@ static void ApplyRuntimeSettings(const std::string& bios_path)
 	{
 		const std::string bios_dir(Path::GetDirectory(bios_path));
 		const std::string bios_file(Path::GetFileName(bios_path));
+		NSLog(@"[ARMSX2] BIOS dir=%s file=%s", bios_dir.c_str(), bios_file.c_str());
 		s_settings_interface->SetStringValue("Folders", "Bios", bios_dir.c_str());
 		s_settings_interface->SetStringValue("Filenames", "BIOS", bios_file.c_str());
 	}
@@ -359,6 +361,7 @@ static bool InitializeCore(const std::string& data_root, const std::string& reso
 
 	s_data_root = data_root;
 	s_resources_root = resources_root;
+	NSLog(@"[ARMSX2] Initialize data=%s resources=%s", s_data_root.c_str(), s_resources_root.c_str());
 	EnsureDirectory(s_data_root);
 
 	EmuFolders::AppRoot = s_data_root;
@@ -378,6 +381,9 @@ static bool InitializeCore(const std::string& data_root, const std::string& reso
 	ApplyRuntimeSettings(std::string());
 	EmuFolders::LoadConfig(*s_settings_interface);
 	EmuFolders::EnsureFoldersExist();
+	NSLog(@"[ARMSX2] Folders app=%s data=%s resources=%s memcards=%s logs=%s",
+		EmuFolders::AppRoot.c_str(), EmuFolders::DataRoot.c_str(), EmuFolders::Resources.c_str(),
+		EmuFolders::MemoryCards.c_str(), EmuFolders::Logs.c_str());
 	EnsureDefaultMemoryCards();
 	ImGuiManager::SetFontPathAndRange(
 		Path::Combine(EmuFolders::Resources, "fonts" FS_OSPATH_SEPARATOR_STR "Roboto-Regular.ttf"), {});
@@ -392,6 +398,7 @@ static void RunVM(std::string iso_path, std::string bios_path)
 	t_on_cpu_thread = true;
 	s_running = true;
 	s_stop_requested = false;
+	NSLog(@"[ARMSX2] RunVM iso=%s bios=%s", iso_path.c_str(), bios_path.c_str());
 	ApplyRuntimeSettings(bios_path);
 	EnsureDefaultMemoryCards();
 
@@ -418,6 +425,7 @@ static void RunVM(std::string iso_path, std::string bios_path)
 	}
 
 	VMManager::SetState(VMState::Running);
+	NSLog(@"[ARMSX2] VM running");
 	while (!s_stop_requested)
 	{
 		DrainCPUThreadTasks();
@@ -435,6 +443,7 @@ static void RunVM(std::string iso_path, std::string bios_path)
 	DrainCPUThreadTasks();
 	t_on_cpu_thread = false;
 	s_running = false;
+	NSLog(@"[ARMSX2] VM stopped");
 }
 
 static bool RunVMTaskSync(std::function<bool()> task)
@@ -484,6 +493,8 @@ AMETHYST_EXPORT int ARMSX2AmethystInitialize(const char* data_root, const char* 
 AMETHYST_EXPORT int ARMSX2AmethystStart(UIView* render_view, const char* iso_path, const char* bios_path)
 {
 	const std::string iso = StringFromCString(iso_path);
+	NSLog(@"[ARMSX2] Start request iso=%s bios=%s initialized=%d running=%d",
+		iso.c_str(), StringFromCString(bios_path).c_str(), s_initialized.load(), s_running.load());
 	if (!s_initialized)
 	{
 		SetLastError("core is not initialized");
