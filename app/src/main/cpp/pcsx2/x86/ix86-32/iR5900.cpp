@@ -6,7 +6,13 @@
 #include "DebugTools/Breakpoints.h"
 #include "Elfheader.h"
 #include "GS.h"
+#include "Host.h"
 #include "Memory.h"
+
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/vm_region.h>
+#endif
 #include "Patch.h"
 #include "R3000A.h"
 #include "R5900OpcodeTables.h"
@@ -16,11 +22,22 @@
 #include "x86/iR5900.h"
 #include "x86/iR5900Analysis.h"
 
+// AMPS2 sentinel marker, written by EnterRecompiledCode prologue (defined in AmethystBridge.mm)
+extern "C" u32 g_amethyst_jit_marker;
+// AMPS2: JIT dispatcher LDR diagnostic global (defined in AmethystBridge.mm)
+extern "C" uint64_t g_amps2_jit_dispatch_pc;
+extern "C" uint64_t g_amps2_jit_dispatch_rcx;
+extern "C" uint64_t g_amps2_jit_dispatch_rax;
+extern "C" uint64_t g_amps2_jit_dispatch_count;
+
 #include "common/AlignedMalloc.h"
 #include "common/FastJmp.h"
 #include "common/HeapArray.h"
 #include "common/Perf.h"
 #include "x86/microVU_Misc.h"
+
+#include <cstdlib>
+#include <cstring>
 
 // Only for MOVQ workaround.
 #if !defined(__ANDROID__) && !defined(PCSX2_IOS)
@@ -44,6 +61,17 @@
 using namespace x86Emitter;
 #endif
 using namespace R5900;
+
+static void AMPS2Trace(const char* message)
+{
+	static const bool enabled = []() {
+		const char* value = std::getenv("AM_PS2_JIT_DIAG");
+		return value && value[0] != '\0' && std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+			std::strcmp(value, "FALSE") != 0;
+	}();
+	if (enabled)
+		Host::ReportInfoAsync("AMPS2", message);
+}
 
 static bool eeRecNeedsReset = false;
 static bool eeCpuExecuting = false;
@@ -396,9 +424,16 @@ static const void* _DynGen_JITCompile()
 //	u8* retval = xGetAlignedCallTarget();
     armAlignAsmPtr();
     u8* retval = armGetCurrentCodePointer();
+    armAsm->bti(a64::EmitBTI_jc);
 
 //	xFastCall((const void*)recRecompile, ptr32[&cpuRegs.pc]);
     armLoad(EAX, PTR_CPU(cpuRegs.pc));
+    armMoveAddressToReg(a64::x16, &g_amps2_jit_dispatch_pc);
+    armAsm->Str(EAX, a64::MemOperand(a64::x16));
+    armMoveAddressToReg(a64::x16, &g_amps2_jit_dispatch_count);
+    armAsm->Ldr(REX, a64::MemOperand(a64::x16));
+    armAsm->Add(REX, REX, 1);
+    armAsm->Str(REX, a64::MemOperand(a64::x16));
     armEmitCall(reinterpret_cast<const void*>(recRecompile));
 
 	// C equivalent:
@@ -415,10 +450,15 @@ static const void* _DynGen_JITCompile()
     ////
     armAsm->Lsr(ECX, EAX, 16);
     armAsm->Ldr(RCX, a64::MemOperand(RSTATE_x29, RCX, a64::LSL, 3));
+    armMoveAddressToReg(a64::x16, &g_amps2_jit_dispatch_rcx);
+    armAsm->Str(RCX, a64::MemOperand(a64::x16));
     ////
     armAsm->Lsr(EAX, EAX, 2);
     armAsm->Ldr(RAX, a64::MemOperand(RCX, RAX, a64::LSL, 3));
     ////
+    armMoveAddressToReg(a64::x16, &g_amps2_jit_dispatch_rax);
+    armAsm->Str(RAX, a64::MemOperand(a64::x16));
+    armAsm->And(RAX, RAX, 0xFFFFFFFFFFull);
     armAsm->Br(RAX);
 
 	return retval;
@@ -429,6 +469,7 @@ static const void* _DynGen_DispatcherReg()
 {
 //	u8* retval = xGetPtr(); // fallthrough target, can't align it!
     u8* retval = armGetCurrentCodePointer();
+    armAsm->bti(a64::EmitBTI_jc);
 
 	// C equivalent:
 	// u32 addr = cpuRegs.pc;
@@ -441,13 +482,24 @@ static const void* _DynGen_DispatcherReg()
 //	xJMP(ptrNative[rbx * (wordsize / 4) + rcx]);
 
     armLoad(EAX, PTR_CPU(cpuRegs.pc));
+    armMoveAddressToReg(a64::x16, &g_amps2_jit_dispatch_pc);
+    armAsm->Str(EAX, a64::MemOperand(a64::x16));
+    armMoveAddressToReg(a64::x16, &g_amps2_jit_dispatch_count);
+    armAsm->Ldr(REX, a64::MemOperand(a64::x16));
+    armAsm->Add(REX, REX, 1);
+    armAsm->Str(REX, a64::MemOperand(a64::x16));
     ////
     armAsm->Lsr(ECX, EAX, 16);
     armAsm->Ldr(RCX, a64::MemOperand(RSTATE_x29, RCX, a64::LSL, 3));
+    armMoveAddressToReg(a64::x16, &g_amps2_jit_dispatch_rcx);
+    armAsm->Str(RCX, a64::MemOperand(a64::x16));
     ////
     armAsm->Lsr(EAX, EAX, 2);
     armAsm->Ldr(RAX, a64::MemOperand(RCX, RAX, a64::LSL, 3));
     ////
+    armMoveAddressToReg(a64::x16, &g_amps2_jit_dispatch_rax);
+    armAsm->Str(RAX, a64::MemOperand(a64::x16));
+    armAsm->And(RAX, RAX, 0xFFFFFFFFFFull);
     armAsm->Br(RAX);
 
 	return retval;
@@ -457,6 +509,7 @@ static const void* _DynGen_DispatcherEvent()
 {
 //	u8* retval = xGetPtr();
     u8* retval = armGetCurrentCodePointer();
+    armAsm->bti(a64::EmitBTI_jc);
 
 //	xFastCall((const void*)recEventTest);
     armEmitCall(reinterpret_cast<const void*>(recEventTest));
@@ -468,8 +521,45 @@ static const void* _DynGen_EnterRecompiledCode()
 {
 	pxAssertMsg(DispatcherReg, "Dynamically generated dispatchers are required prior to generating EnterRecompiledCode!");
 
-//	u8* retval = xGetAlignedCallTarget();
-    armAlignAsmPtr();
+	armAlignAsmPtr();
+	u8* retval = armGetCurrentCodePointer();
+	// BTI landing pad: called via BLR from C dispatcher loop.
+	armAsm->bti(a64::EmitBTI_jc);
+
+	// AMPS2 sentinel: write 0xbeef to g_amethyst_jit_marker as soon as we land here,
+	// so the diagnostics thread can confirm TXM actually granted exec on this page.
+	{
+		armMoveAddressToReg(RSCRATCHADDR, &g_amethyst_jit_marker);
+		armAsm->Mov(EEX, 0xbeefu);
+		armAsm->Str(EEX, a64::MemOperand(RSCRATCHADDR));
+	}
+
+#ifdef ENABLE_VTUNE
+	xScopedStackFrame frame(true, true);
+#else
+#ifdef _WIN32
+	static constexpr u32 stack_size = 32 + 8;
+#else
+	static constexpr u32 stack_size = 16;
+#endif
+	armAsm->Sub(a64::sp, a64::sp, stack_size);
+#endif
+
+	armMoveAddressToReg(RSTATE_x29, &recLUT);
+	armMoveAddressToReg(RSTATE_PSX, &psxRegs);
+	armMoveAddressToReg(RSTATE_CPU, &g_cpuRegistersPack);
+
+	if (CHECK_FASTMEM) {
+		armAsm->Ldr(RFASTMEMBASE, PTR_CPU(vtlbdata.fastmem_base));
+	}
+
+	armEmitJmp(DispatcherReg);
+
+	return retval;
+}
+
+static const void* _DynGen_EnterRecompiledCode_Disabled()
+{
     u8* retval = armGetCurrentCodePointer();
 
 #ifdef ENABLE_VTUNE
@@ -509,6 +599,7 @@ static const void* _DynGen_DispatchBlockDiscard()
 {
 //	u8* retval = xGetPtr();
     u8* retval = armGetCurrentCodePointer();
+    armAsm->bti(a64::EmitBTI_jc);
 //	xFastCall((const void*)dyna_block_discard);
     armEmitCall(reinterpret_cast<const void*>(dyna_block_discard));
 //	xJMP(DispatcherReg);
@@ -520,6 +611,7 @@ static const void* _DynGen_DispatchPageReset()
 {
 //	u8* retval = xGetPtr();
     u8* retval = armGetCurrentCodePointer();
+    armAsm->bti(a64::EmitBTI_jc);
 //	xFastCall((const void*)dyna_page_reset);
     armEmitCall(reinterpret_cast<const void*>(dyna_page_reset));
 //	xJMP(DispatcherReg);
@@ -634,28 +726,45 @@ alignas(16) static u8 manual_counter[Ps2MemSize::TotalRam >> 12];
 static void recResetRaw()
 {
 	Console.WriteLn(Color_StrongBlack, "EE/iR5900 Recompiler Reset");
+	AMPS2Trace("recResetRaw begin");
 
 	if (CHECK_EXTRAMEM != extraRam)
 	{
+		AMPS2Trace("recResetRaw recReserveRAM begin");
 		recReserveRAM();
+		AMPS2Trace("recResetRaw recReserveRAM done");
 		extraRam = !extraRam;
 	}
 
+	AMPS2Trace("recResetRaw profiler reset begin");
 	EE::Profiler.Reset();
+	AMPS2Trace("recResetRaw profiler reset done");
 
 //	xSetPtr(SysMemory::GetEERec());
+	AMPS2Trace("recResetRaw armSetAsmPtr begin");
     armSetAsmPtr(SysMemory::GetEERec(), _4kb, nullptr);
+	AMPS2Trace("recResetRaw armSetAsmPtr done");
+	AMPS2Trace("recResetRaw armStartBlock begin");
     armStartBlock();
+	AMPS2Trace("recResetRaw armStartBlock done");
 
+	AMPS2Trace("recResetRaw _DynGen_Dispatchers begin");
 	_DynGen_Dispatchers();
+	AMPS2Trace("recResetRaw _DynGen_Dispatchers done");
 
     // recVTLB => iR5900LoadStore
+	AMPS2Trace("recResetRaw vtlb_DynGenDispatchers begin");
     vtlb_DynGenDispatchers();
+	AMPS2Trace("recResetRaw vtlb_DynGenDispatchers done");
 
 //	recPtr = xGetPtr();
+	AMPS2Trace("recResetRaw armEndBlock begin");
     recPtr = armEndBlock();
+	AMPS2Trace("recResetRaw armEndBlock done");
 
+	AMPS2Trace("recResetRaw ClearRecLUT begin");
 	ClearRecLUT(reinterpret_cast<BASEBLOCK*>(recLutReserve_RAM.data()), recLutSize);
+	AMPS2Trace("recResetRaw ClearRecLUT done");
 	recRAMCopy.fill(0);
 
 	maxrecmem = 0;
@@ -671,6 +780,7 @@ static void recResetRaw()
 
 	memset(manual_page, 0, sizeof(manual_page));
 	memset(manual_counter, 0, sizeof(manual_counter));
+	AMPS2Trace("recResetRaw done");
 }
 
 void recShutdown()
@@ -753,16 +863,57 @@ static void recExecute()
 		recResetRaw();
 	}
 
+	AMPS2Trace("recExecute about to fastjmp_set");
 	// setjmp will save the register context and will return 0
 	// A call to longjmp will restore the context (included the eip/rip)
 	// but will return the longjmp 2nd parameter (here 1)
 	if (!fastjmp_set(&m_SetJmp_StateCheck))
 	{
 		eeCpuExecuting = true;
+		{
+			char buf[256];
+			const u32* code = reinterpret_cast<const u32*>(EnterRecompiledCode);
+			std::snprintf(buf, sizeof(buf),
+				"recExecute EnterRecompiledCode=%p DispatcherReg=%p bytes=%08x %08x %08x %08x",
+				EnterRecompiledCode, DispatcherReg, code[0], code[1], code[2], code[3]);
+			AMPS2Trace(buf);
+
+			{
+				const u32* ee = reinterpret_cast<const u32*>(SysMemory::GetEERec());
+				const u32* iop = reinterpret_cast<const u32*>(SysMemory::GetIOPRec());
+				std::snprintf(buf, sizeof(buf),
+					"recExecute EErec=%p +0:%08x +4:%08x +8:%08x +c:%08x +30:%08x +34:%08x +38:%08x +3c:%08x",
+					ee, ee[0], ee[1], ee[2], ee[3], ee[12], ee[13], ee[14], ee[15]);
+				AMPS2Trace(buf);
+				std::snprintf(buf, sizeof(buf),
+					"recExecute IOPrec=%p +0:%08x +4:%08x +8:%08x +c:%08x +30:%08x +34:%08x +38:%08x +3c:%08x",
+					iop, iop[0], iop[1], iop[2], iop[3], iop[12], iop[13], iop[14], iop[15]);
+				AMPS2Trace(buf);
+			}
+
+#if defined(__APPLE__)
+			// Query VM region permissions to verify TXM granted execute on the JIT page.
+			vm_address_t addr = reinterpret_cast<vm_address_t>(EnterRecompiledCode);
+			vm_size_t sz = 0;
+			vm_region_basic_info_data_64_t info = {};
+			mach_msg_type_number_t info_cnt = VM_REGION_BASIC_INFO_COUNT_64;
+			mach_port_t obj_name = MACH_PORT_NULL;
+			kern_return_t kr = vm_region_64(mach_task_self(), &addr, &sz,
+				VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info),
+				&info_cnt, &obj_name);
+			std::snprintf(buf, sizeof(buf),
+				"recExecute region kr=%d base=%lx size=%lx prot=%x maxprot=%x reserved=%d",
+				kr, (unsigned long)addr, (unsigned long)sz,
+				info.protection, info.max_protection, info.reserved);
+			AMPS2Trace(buf);
+#endif
+		}
 		((void (*)())EnterRecompiledCode)();
+		AMPS2Trace("recExecute EnterRecompiledCode returned (unreachable)");
 
 		// Generally unreachable code here ...
 	}
+	AMPS2Trace("recExecute after fastjmp_set (longjmp returned)");
 
 	eeCpuExecuting = false;
 
@@ -2917,10 +3068,34 @@ StartRecomp:
 #endif
 	Perf::ee.RegisterPC((void*)s_pCurBlockEx->fnptr, s_pCurBlockEx->x86size, s_pCurBlockEx->startpc);
 
-//	recPtr = xGetPtr();
-    recPtr = armEndBlock();
+	//	recPtr = xGetPtr();
+	    const u32 guest_startpc = startpc;
+	    const u32 guest_endpc = pc;
+	    const uptr host_fn = s_pCurBlockEx->fnptr;
+	    const u32 host_size = s_pCurBlockEx->x86size;
+	    recPtr = armEndBlock();
 
-	pxAssert((g_cpuHasConstReg & g_cpuFlushedConstReg) == g_cpuHasConstReg);
+	    const u32 guest_page = guest_startpc & 0xFFFFF000u;
+	    if (guest_page == 0x9FC42000u || guest_page == 0x8000E000u)
+	    {
+	        std::fprintf(stderr,
+	            "AMPS2 recBlock focus start=0x%08X end=0x%08X host=%p hostSize=%u insts=%u dispatchCount=%llu\n",
+	            guest_startpc, guest_endpc, reinterpret_cast<void*>(host_fn), host_size,
+	            (guest_endpc - guest_startpc) >> 2,
+	            static_cast<unsigned long long>(g_amps2_jit_dispatch_count));
+	        std::fprintf(stderr, "AMPS2 recBlock focus mips");
+	        for (u32 addr = guest_startpc; addr < guest_endpc && addr < guest_startpc + 64; addr += 4)
+	            std::fprintf(stderr, " %08X:%08X", addr, memRead32(addr));
+	        std::fprintf(stderr, "\n");
+	        const u32* arm_code = reinterpret_cast<const u32*>(host_fn);
+	        const u32 arm_words = std::min<u32>(host_size / 4, 32);
+	        std::fprintf(stderr, "AMPS2 recBlock focus arm64");
+	        for (u32 i = 0; i < arm_words; ++i)
+	            std::fprintf(stderr, " +%02X:%08X", i * 4, arm_code[i]);
+	        std::fprintf(stderr, "\n");
+	    }
+
+		pxAssert((g_cpuHasConstReg & g_cpuFlushedConstReg) == g_cpuHasConstReg);
 
 	s_pCurBlock = nullptr;
 	s_pCurBlockEx = nullptr;

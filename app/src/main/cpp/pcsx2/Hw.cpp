@@ -66,6 +66,7 @@ __fi uint intcInterrupt()
 
 __fi uint dmacInterrupt()
 {
+	static u32 s_amethyst_dmac_interrupt_log_count = 0;
 	if( ((psHu16(DMAC_STAT + 2) & psHu16(DMAC_STAT)) == 0 ) &&
 		( psHu16(DMAC_STAT) & 0x8000) == 0 )
 	{
@@ -83,20 +84,43 @@ __fi uint dmacInterrupt()
 		((psHu16(DMAC_STAT + 2) & psHu16(DMAC_STAT)) |
 		 (psHu16(DMAC_STAT) & 0x8000))
 	);
+	if (((psHu16(DMAC_STAT + 2) & psHu16(DMAC_STAT)) & (1 << DMAC_GIF)) &&
+		((s_amethyst_dmac_interrupt_log_count < 64) || ((s_amethyst_dmac_interrupt_log_count & 0xfff) == 0)))
+	{
+		Console.WriteLn("AMPS2 dmacInterrupt active pc=0x%08x cycle=%u stat=0x%04x mask=0x%04x status=0x%08x cause=0x%08x interrupt=0x%08x",
+			cpuRegs.pc, cpuRegs.cycle, static_cast<u32>(psHu16(DMAC_STAT)), static_cast<u32>(psHu16(DMAC_STAT + 2)),
+			cpuRegs.CP0.n.Status.val, cpuRegs.CP0.n.Cause, cpuRegs.interrupt);
+		++s_amethyst_dmac_interrupt_log_count;
+	}
 
 	//cpuException(0x800, cpuRegs.branch);
 	return 0x800;
 }
 
+extern "C" uint64_t g_amps2_ee_intc_count[32] = {0};
+
 void hwIntcIrq(int n)
 {
 	psHu32(INTC_STAT) |= 1<<n;
+	if (n >= 0 && n < 32) g_amps2_ee_intc_count[n]++;
 	if(psHu32(INTC_MASK) & (1<<n))cpuTestINTCInts();
 }
 
 void hwDmacIrq(int n)
 {
+	const u32 before = psHu32(DMAC_STAT);
 	psHu32(DMAC_STAT) |= 1<<n;
+	if (n == DMAC_GIF || ((before ^ psHu32(DMAC_STAT)) & (1 << DMAC_GIF)))
+	{
+		static u32 s_amethyst_hwdmac_log_count = 0;
+		if ((s_amethyst_hwdmac_log_count < 128) || ((s_amethyst_hwdmac_log_count & 0xfff) == 0))
+		{
+			Console.WriteLn("AMPS2 hwDmacIrq n=%d pc=0x%08x cycle=%u stat_before=0x%08x stat_after=0x%08x mask=0x%04x interrupt=0x%08x",
+				n, cpuRegs.pc, cpuRegs.cycle, before, psHu32(DMAC_STAT),
+				static_cast<u32>(psHu16(DMAC_STAT + 2)), cpuRegs.interrupt);
+		}
+		++s_amethyst_hwdmac_log_count;
+	}
 	if(psHu16(DMAC_STAT+2) & (1<<n))cpuTestDMACInts();
 }
 
@@ -359,4 +383,3 @@ bool hwDmacSrcChain(DMACh& dma, int id)
 
 	return false;
 }
-

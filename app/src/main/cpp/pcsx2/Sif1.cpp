@@ -8,6 +8,9 @@
 #include "Sif.h"
 #include "IopHw.h"
 
+#include <atomic>
+#include <cstdio>
+
 _sif sif1;
 
 static bool done = false;
@@ -260,8 +263,11 @@ static __fi void Sif1End()
 }
 
 // Transfer EE to IOP, putting data in the fifo as an intermediate step.
+extern "C" uint64_t g_amps2_sif1_dma_count = 0;
+
 __fi void SIF1Dma()
 {
+	g_amps2_sif1_dma_count++;
 	int BusyCheck = 0;
 
 	if (sif1_dma_stall)

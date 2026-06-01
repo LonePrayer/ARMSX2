@@ -190,6 +190,7 @@ elseif(IOS)
 	target_sources(common PRIVATE
 		Darwin/DarwinThreads.cpp
 		IOS/IOSMisc.cpp
+		IOS/IOSMachExceptions.cpp
 	)
 	target_compile_definitions(common PRIVATE PCSX2_IOS=1)
 	target_compile_options(common PRIVATE -fobjc-arc)

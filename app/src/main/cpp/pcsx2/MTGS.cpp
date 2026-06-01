@@ -723,6 +723,15 @@ void MTGS::GenericStall(uint size)
 
 	if (freeroom <= size)
 	{
+		static u32 s_stall_log_count = 0;
+		if (s_stall_log_count < 64 || ((s_stall_log_count & 0xff) == 0))
+		{
+			Console.Warning("AMPS2 MTGS stall size=%u free=%u read=%u write=%u tally=%u signal=%d queued=%d",
+				size, freeroom, readpos, writepos, s_CopyDataTally, s_SignalRingEnable.load(std::memory_order_relaxed),
+				s_QueuedFrameCount.load(std::memory_order_relaxed));
+		}
+		++s_stall_log_count;
+
 		// writepos will overlap readpos if we commit the data, so we need to wait until
 		// readpos is out past the end of the future write pos, or until it wraps around
 		// (in which case writepos will be >= readpos).

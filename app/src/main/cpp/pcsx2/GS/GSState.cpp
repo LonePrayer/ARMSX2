@@ -32,6 +32,58 @@ static __fi bool IsFirstProvokingVertex()
 	return (GSIsHardwareRenderer() && !g_gs_device->Features().provoking_vertex_last);
 }
 
+static const char* AmethystGIFRegName(u32 addr)
+{
+	switch (addr & 0x7f)
+	{
+		case GIF_A_D_REG_PRIM:
+			return "PRIM";
+		case GIF_A_D_REG_TEX0_1:
+			return "TEX0_1";
+		case GIF_A_D_REG_TEX0_2:
+			return "TEX0_2";
+		case GIF_A_D_REG_FRAME_1:
+			return "FRAME_1";
+		case GIF_A_D_REG_FRAME_2:
+			return "FRAME_2";
+		case GIF_A_D_REG_ZBUF_1:
+			return "ZBUF_1";
+		case GIF_A_D_REG_ZBUF_2:
+			return "ZBUF_2";
+		case GIF_A_D_REG_BITBLTBUF:
+			return "BITBLTBUF";
+		case GIF_A_D_REG_TRXPOS:
+			return "TRXPOS";
+		case GIF_A_D_REG_TRXREG:
+			return "TRXREG";
+		case GIF_A_D_REG_TRXDIR:
+			return "TRXDIR";
+		case GIF_A_D_REG_HWREG:
+			return "HWREG";
+		case GIF_A_D_REG_XYZ2:
+			return "XYZ2";
+		case GIF_A_D_REG_XYZF2:
+			return "XYZF2";
+		default:
+			return nullptr;
+	}
+}
+
+static void AmethystLogGIFReg(u32 addr, const GIFReg* reg)
+{
+	static u32 s_log_count = 0;
+	const char* name = AmethystGIFRegName(addr);
+	if (!name)
+		return;
+
+	if (s_log_count < 512 || ((s_log_count & 0x7ff) == 0))
+	{
+		Console.WriteLn("AMPS2 GIFREG %s addr=0x%02x value=0x%08x_%08x n=%d transfer=%d",
+			name, addr & 0x7f, reg->U32[1], reg->U32[0], GSState::s_n, GSState::s_transfer_n);
+	}
+	++s_log_count;
+}
+
 constexpr int GSState::GetSaveStateSize(int version)
 {
 	int size = 0;
@@ -649,6 +701,7 @@ void GSState::GIFPackedRegHandlerFOG(const GIFPackedReg* RESTRICT r)
 
 void GSState::GIFPackedRegHandlerA_D(const GIFPackedReg* RESTRICT r)
 {
+	AmethystLogGIFReg(r->A_D.ADDR, &r->r);
 	(this->*m_fpGIFRegHandlers[r->A_D.ADDR & 0x7F])(&r->r);
 }
 

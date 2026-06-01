@@ -4,11 +4,50 @@
 #include "microVU.h"
 
 #include "common/AlignedMalloc.h"
+#include "common/Console.h"
 #include "common/Perf.h"
 #include "common/StringUtil.h"
+#include "pcsx2/DebugTools/Debug.h"
+
+#include <string>
 
 alignas(128) vuRegistersPack g_vuRegistersPack;
 VU_Thread& vu1Thread = g_vuRegistersPack.vu1Thread;
+
+static void AmethystDumpVU1MicroWindow(const char* label, u32 pc)
+{
+	if (!VU1.Micro)
+	{
+		Console.WriteLn("AMPS2 VU1Micro %s unavailable tpc=0x%08x branch=0x%08x stat=0x%08x vu1Micro=%p",
+			label, VU1.VI[REG_TPC].UL, microVU1.branch, VU0.VI[REG_VPU_STAT].UL, VU1.Micro);
+		std::fprintf(stderr, "AMPS2 VU1Micro %s unavailable tpc=0x%08x branch=0x%08x stat=0x%08x vu1Micro=%p\n",
+			label, VU1.VI[REG_TPC].UL, microVU1.branch, VU0.VI[REG_VPU_STAT].UL, VU1.Micro);
+		std::fflush(stderr);
+		return;
+	}
+
+	const u32 base = pc & ~0x3f;
+	Console.WriteLn("AMPS2 VU1Micro %s base=0x%04x tpc=0x%08x branch=0x%08x bad=0x%08x evil=0x%08x evilevil=0x%08x flags=0x%08x stat=0x%08x",
+		label, base, VU1.VI[REG_TPC].UL, microVU1.branch, microVU1.badBranch, microVU1.evilBranch,
+		microVU1.evilevilBranch, microVU1.regs().flags, VU0.VI[REG_VPU_STAT].UL);
+	std::fprintf(stderr, "AMPS2 VU1Micro %s base=0x%04x tpc=0x%08x branch=0x%08x bad=0x%08x evil=0x%08x evilevil=0x%08x flags=0x%08x stat=0x%08x\n",
+		label, base, VU1.VI[REG_TPC].UL, microVU1.branch, microVU1.badBranch, microVU1.evilBranch,
+		microVU1.evilevilBranch, microVU1.regs().flags, VU0.VI[REG_VPU_STAT].UL);
+
+	for (u32 offset = 0; offset < 0x80; offset += 8)
+	{
+		const u32 byte_pc = (base + offset) & 0x3fff;
+		const u32 lower = *reinterpret_cast<const u32*>(&VU1.Micro[byte_pc]);
+		const u32 upper = *reinterpret_cast<const u32*>(&VU1.Micro[byte_pc + 4]);
+		const std::string upper_text = disVU1MicroUF(upper, byte_pc);
+		const std::string lower_text = disVU1MicroLF(lower, byte_pc);
+		Console.WriteLn("AMPS2 VU1Micro %s pc=0x%04x lower=0x%08x upper=0x%08x | %s | %s",
+			label, byte_pc, lower, upper, upper_text.c_str(), lower_text.c_str());
+		std::fprintf(stderr, "AMPS2 VU1Micro %s pc=0x%04x lower=0x%08x upper=0x%08x | %s | %s\n",
+			label, byte_pc, lower, upper, upper_text.c_str(), lower_text.c_str());
+	}
+	std::fflush(stderr);
+}
 
 //------------------------------------------------------------------
 // Micro VU - Main Functions
@@ -396,6 +435,21 @@ void recMicroVU1::Step()
 
 void recMicroVU1::Execute(u32 cycles)
 {
+	static std::atomic<u32> s_amethyst_vu1_execute_count{0};
+	u32 amethyst_diag_count = 0;
+	const bool amethyst_diag = AmethystRefreshMicroVUDiagEnabled();
+	if (amethyst_diag)
+	{
+		amethyst_diag_count = s_amethyst_vu1_execute_count.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (amethyst_diag_count <= 128 || ((amethyst_diag_count & AMPS2_VU_DIAG_SAMPLE_MASK) == 0))
+		{
+			std::fprintf(stderr, "AMPS2 VU1Rec execute enter #%u cycles=%u stat=0x%08x tpc=0x%08x vu1Cycle=%u cpuCycle=%u mvuCycles=%d total=%d nextBlock=%u\n",
+				amethyst_diag_count, cycles, VU0.VI[REG_VPU_STAT].UL, VU1.VI[REG_TPC].UL,
+				VU1.cycle, cpuRegs.cycle, microVU1.cycles, microVU1.totalCycles, VU1.nextBlockCycles);
+			std::fflush(stderr);
+		}
+	}
+
 	if (!THREAD_VU1)
 	{
 		if (!(VU0.VI[REG_VPU_STAT].UL & 0x100))
@@ -404,6 +458,29 @@ void recMicroVU1::Execute(u32 cycles)
 	VU1.VI[REG_TPC].UL <<= 3;
 	((mVUrecCall)microVU1.startFunct)(VU1.VI[REG_TPC].UL, cycles);
 	VU1.VI[REG_TPC].UL >>= 3;
+	if (amethyst_diag && (amethyst_diag_count <= 128 || ((amethyst_diag_count & AMPS2_VU_DIAG_SAMPLE_MASK) == 0)))
+	{
+		std::fprintf(stderr, "AMPS2 VU1Rec execute exit  #%u cycles=%u stat=0x%08x tpc=0x%08x vu1Cycle=%u cpuCycle=%u mvuCycles=%d total=%d nextBlock=%u\n",
+			amethyst_diag_count, cycles, VU0.VI[REG_VPU_STAT].UL, VU1.VI[REG_TPC].UL,
+			VU1.cycle, cpuRegs.cycle, microVU1.cycles, microVU1.totalCycles, VU1.nextBlockCycles);
+		std::fflush(stderr);
+	}
+	if (amethyst_diag && (VU0.VI[REG_VPU_STAT].UL & 0x100))
+	{
+		static std::atomic<bool> s_dumped_busy{false};
+		bool expected = false;
+		if (!s_dumped_busy.load(std::memory_order_relaxed) && VU1.Micro)
+		{
+			AmethystDumpVU1MicroWindow("busy-pc", VU1.VI[REG_TPC].UL << 3);
+			AmethystDumpVU1MicroWindow("busy-zero", 0);
+			AmethystDumpVU1MicroWindow("busy-0058", 0x58);
+			s_dumped_busy.store(true, std::memory_order_relaxed);
+		}
+		else if (!VU1.Micro && (amethyst_diag_count <= 128 || ((amethyst_diag_count & AMPS2_VU_DIAG_SAMPLE_MASK) == 0)))
+		{
+			AmethystDumpVU1MicroWindow("busy-null", VU1.VI[REG_TPC].UL << 3);
+		}
+	}
 	if (microVU1.regs().flags & 0x4 && !THREAD_VU1)
 	{
 		microVU1.regs().flags &= ~0x4;

@@ -25,6 +25,18 @@ static const uint EECNT_FUTURE_TARGET = 0x10000000;
 
 uint g_FrameCount = 0;
 
+static __fi void AmethystLogVSyncPhase(const char* phase)
+{
+	static u32 s_amethyst_vsync_log_count = 0;
+	const bool in_target_window = (g_FrameCount >= 300 && g_FrameCount <= 340);
+	if (!in_target_window && s_amethyst_vsync_log_count >= 64)
+		return;
+
+	Console.WriteLn("AMPS2 VSync frame=%u phase=%s pc=0x%08x cycle=%u next=%u interrupt=0x%08x dmastall=0x%08x",
+		g_FrameCount, phase, cpuRegs.pc, cpuRegs.cycle, cpuRegs.nextEventCycle, cpuRegs.interrupt, cpuRegs.dmastall);
+	++s_amethyst_vsync_log_count;
+}
+
 // Counter 4 takes care of scanlines - hSync/hBlanks
 // Counter 5 takes care of vSync/vBlanks
 Counter counters[4];
@@ -486,18 +498,24 @@ static __fi void DoFMVSwitch()
 
 static __fi void VSyncStart(u32 sCycle)
 {
+	AmethystLogVSyncPhase("start");
 	// End-of-frame tasks.
 	DoFMVSwitch();
+	AmethystLogVSyncPhase("after-fmv");
 	VMManager::Internal::VSyncOnCPUThread();
+	AmethystLogVSyncPhase("after-vm-vsync");
 
 	// Don't bother throttling if we're going to pause.
 	if (!VMManager::Internal::IsExecutionInterrupted())
 		VMManager::Internal::Throttle();
+	AmethystLogVSyncPhase("after-throttle");
 
 	gsPostVsyncStart(); // MUST be after framelimit; doing so before causes funk with frame times!
+	AmethystLogVSyncPhase("after-gs-post");
 
 	// Poll input after MTGS frame push, just in case it has to stall to catch up.
 	VMManager::Internal::PollInputOnCPUThread();
+	AmethystLogVSyncPhase("after-poll-input");
 
 	EECNT_LOG("    ================  EE COUNTER VSYNC START (frame: %d)  ================", g_FrameCount);
 
@@ -508,9 +526,11 @@ static __fi void VSyncStart(u32 sCycle)
 
 	if (!GSSMODE1reg.SINT)
 	{
+		AmethystLogVSyncPhase("before-irq");
 		hwIntcIrq(INTC_VBLANK_S);
 		rcntStartGate(true, sCycle); // Counters Start Gate code
 		psxVBlankStart();
+		AmethystLogVSyncPhase("after-irq");
 	}
 
 	// INTC - VB Blank Start Hack --
@@ -540,6 +560,7 @@ static __fi void VSyncStart(u32 sCycle)
 	// Need to re-check this, because we might've paused during the sleep time.
 	if (VMManager::Internal::IsExecutionInterrupted())
 		Cpu->ExitExecution();
+	AmethystLogVSyncPhase("end");
 }
 
 static __fi void GSVSync()

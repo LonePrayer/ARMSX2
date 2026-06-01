@@ -13,8 +13,42 @@
 #include "cpuinfo.h"
 #include "imgui.h"
 
+#include <chrono>
+
 #ifdef __APPLE__
 #include "GSMTLSharedHeader.h"
+
+#if defined(PCSX2_IOS)
+static void AmethystMTLLog(NSString* format, ...)
+{
+	va_list args;
+	va_start(args, format);
+	NSString* message = [[NSString alloc] initWithFormat:format arguments:args];
+	va_end(args);
+
+	NSLog(@"[ARMSX2][Metal] %@", message);
+
+	NSURL* documentsURL = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+	NSURL* logDirectoryURL = [[documentsURL URLByAppendingPathComponent:@"ps2" isDirectory:YES] URLByAppendingPathComponent:@"Logs" isDirectory:YES];
+	[NSFileManager.defaultManager createDirectoryAtURL:logDirectoryURL withIntermediateDirectories:YES attributes:nil error:nil];
+
+	NSDateFormatter* formatter = [[NSDateFormatter alloc] init];
+	formatter.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
+	NSString* line = [NSString stringWithFormat:@"%@ [ARMSX2][Metal] %@\n", [formatter stringFromDate:NSDate.date], message];
+	NSURL* logURL = [logDirectoryURL URLByAppendingPathComponent:@"metal.log"];
+	NSFileHandle* handle = [NSFileHandle fileHandleForWritingAtPath:logURL.path];
+	if (!handle)
+	{
+		[line writeToURL:logURL atomically:YES encoding:NSUTF8StringEncoding error:nil];
+		return;
+	}
+	[handle seekToEndOfFile];
+	[handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+	[handle closeFile];
+}
+#else
+#define AmethystMTLLog(...) do {} while (0)
+#endif
 
 static constexpr simd::float2 ToSimd(const GSVector2& vec)
 {
@@ -712,7 +746,12 @@ MRCOwned<id<MTLRenderPipelineState>> GSDeviceMTL::MakePipeline(MTLRenderPipeline
 	[desc setVertexFunction:vertex];
 	[desc setFragmentFunction:fragment];
 	NSError* err;
+	const auto start = std::chrono::steady_clock::now();
 	MRCOwned<id<MTLRenderPipelineState>> res = MRCTransfer([m_dev.dev newRenderPipelineStateWithDescriptor:desc error:&err]);
+	const double elapsed_ms = static_cast<double>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count()) / 1000.0;
+	if (elapsed_ms > 8.0)
+		AmethystMTLLog(@"Pipeline compile %@ elapsedMs=%.3f", name ?: @"(unnamed)", elapsed_ms);
 	if (err) [[unlikely]]
 	{
 		NSString* msg = [NSString stringWithFormat:@"Failed to create pipeline %@: %@", name, [err localizedDescription]];
@@ -779,6 +818,7 @@ bool GSDeviceMTL::HasSurface()  const { return static_cast<bool>(m_layer);}
 void GSDeviceMTL::AttachSurfaceOnMainThread()
 {
 	pxAssert([NSThread isMainThread]);
+	AmethystMTLLog(@"AttachSurface begin window=%p size=%ux%u", m_window_info.window_handle, m_window_info.surface_width, m_window_info.surface_height);
 	m_layer = MRCRetain([CAMetalLayer layer]);
 	[m_layer setDrawableSize:CGSizeMake(m_window_info.surface_width, m_window_info.surface_height)];
 	[m_layer setDevice:m_dev.dev];
@@ -786,12 +826,19 @@ void GSDeviceMTL::AttachSurfaceOnMainThread()
 	m_view = MRCRetain((__bridge UIView*)m_window_info.window_handle);
 	[m_view.Get() setContentScaleFactor:UIScreen.mainScreen.scale];
 	[m_layer setFrame:[m_view.Get() bounds]];
+	[m_layer setOpaque:YES];
+	if (@available(iOS 11.0, *))
+		[m_layer setAllowsNextDrawableTimeout:YES];
+	if (@available(iOS 11.2, *))
+		[m_layer setMaximumDrawableCount:3];
+	[m_layer setPresentsWithTransaction:NO];
 	[[m_view.Get() layer] addSublayer:m_layer];
 #else
 	m_view = MRCRetain((__bridge NSView*)m_window_info.window_handle);
 	[m_view setWantsLayer:YES];
 	[m_view setLayer:m_layer];
 #endif
+	AmethystMTLLog(@"AttachSurface done layer=%p sublayers=%lu drawable=%@", m_layer.Get(), (unsigned long)[[m_view.Get() layer] sublayers].count, NSStringFromCGSize([m_layer drawableSize]));
 }
 
 void GSDeviceMTL::DetachSurfaceOnMainThread()
@@ -876,6 +923,7 @@ static MRCOwned<id<MTLSamplerState>> CreateSampler(id<MTLDevice> dev, GSHWDrawCo
 
 bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 { @autoreleasepool {
+	AmethystMTLLog(@"Create begin vsync=%d throttle=%d", static_cast<int>(vsync_mode), allow_present_throttle);
 	if (!GSDevice::Create(vsync_mode, allow_present_throttle))
 		return false;
 
@@ -903,6 +951,7 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 
 	m_name = [[m_dev.dev name] UTF8String];
 	m_queue = MRCTransfer([m_dev.dev newCommandQueue]);
+	AmethystMTLLog(@"Device ready name=%@ queue=%@", [NSString stringWithUTF8String:m_name.c_str()], m_queue.Get());
 
 	m_pass_desc = MRCTransfer([MTLRenderPassDescriptor new]);
 	[m_pass_desc colorAttachments][0].loadAction = MTLLoadActionClear;
@@ -930,13 +979,16 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	{
 		// This is a little less than ideal, pinging back and forward between threads, but we don't really
 		// have any other option, because Qt uses a blocking queued connection for window acquire.
+		AmethystMTLLog(@"AcquireWindow begin");
 		if (!AcquireWindow(true))
 			return false;
+		AmethystMTLLog(@"AcquireWindow done surface=%ux%u", m_window_info.surface_width, m_window_info.surface_height);
 
 		OnMainThread([this]
 		{
 			AttachSurfaceOnMainThread();
 		});
+		AmethystMTLLog(@"AttachSurface returned layer=%p", m_layer.Get());
 
 		// Metal does not support mailbox.
 		m_vsync_mode = (m_vsync_mode == GSVSyncMode::Mailbox) ? GSVSyncMode::FIFO : m_vsync_mode;
@@ -950,11 +1002,19 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	}
 
 	MTLPixelFormat layer_px_fmt = [m_layer pixelFormat];
+	AmethystMTLLog(@"Feature setup begin layerPixelFormat=%lu framebufferFetch=%d primid=%d",
+		static_cast<unsigned long>(layer_px_fmt), m_dev.features.framebuffer_fetch, m_dev.features.primid);
 
 	m_features.broken_point_sampler = false;
 	m_features.vs_expand = !GSConfig.DisableVertexShaderExpand;
 	m_features.primitive_id = m_dev.features.primid;
+	// iOS exposes framebuffer fetch, but not Metal's render-target barrier scope.
+	// Advertising texture_barrier with a no-op barrier produces stale RT reads on tile GPUs.
+#if defined(PCSX2_IOS)
+	m_features.texture_barrier = false;
+#else
 	m_features.texture_barrier = true;
+#endif
 	m_features.provoking_vertex_last = false;
 	m_features.point_expand = true;
 	m_features.line_expand = false;
@@ -964,8 +1024,10 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	m_features.framebuffer_fetch = m_dev.features.framebuffer_fetch && !GSConfig.DisableFramebufferFetch;
 	m_features.stencil_buffer = true;
 	m_features.cas_sharpening = true;
-	m_features.test_and_sample_depth = true;
+	m_features.test_and_sample_depth = m_features.texture_barrier;
 	m_max_texture_size = m_dev.features.max_texsize;
+	AmethystMTLLog(@"Feature setup final framebufferFetch=%d textureBarrier=%d testSampleDepth=%d vertexExpand=%d",
+		m_features.framebuffer_fetch, m_features.texture_barrier, m_features.test_and_sample_depth, m_features.vs_expand);
 
 	// Init metal stuff
 	m_fn_constants = MRCTransfer([MTLFunctionConstantValues new]);
@@ -984,6 +1046,7 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	[clearSpinBuffer updateFence:m_spin_fence];
 	[clearSpinBuffer endEncoding];
 	m_spin_pipeline = MakeComputePipeline(LoadShader(@"waste_time"), @"waste_time");
+	AmethystMTLLog(@"Base compute pipelines begin");
 
 	for (int sharpen_only = 0; sharpen_only < 2; sharpen_only++)
 	{
@@ -991,6 +1054,7 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 		NSString* shader = m_dev.features.has_fast_half ? @"CASHalf" : @"CASFloat";
 		m_cas_pipeline[sharpen_only] = MakeComputePipeline(LoadShader(shader), sharpen_only ? @"CAS Sharpen" : @"CAS Upscale");
 	}
+	AmethystMTLLog(@"Base compute pipelines done");
 
 	m_expand_index_buffer = CreatePrivateBufferWithContent(m_dev.dev, initCommands, MTLResourceHazardTrackingModeUntracked, EXPAND_BUFFER_SIZE, GenerateExpansionIndexBuffer);
 	[m_expand_index_buffer setLabel:@"Point/Sprite Expand Indices"];
@@ -1017,6 +1081,7 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	m_sampler_hw[SamplerSelector::Point().key] = CreateSampler(m_dev.dev, SamplerSelector::Point());
 
 	// Init depth stencil states
+	AmethystMTLLog(@"Depth stencil setup begin");
 	MTLDepthStencilDescriptor* dssdesc = [[MTLDepthStencilDescriptor new] autorelease];
 	MTLStencilDescriptor* stencildesc = [[MTLStencilDescriptor new] autorelease];
 	stencildesc.stencilCompareFunction = MTLCompareFunctionAlways;
@@ -1073,8 +1138,10 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 		[dssdesc setLabel:[NSString stringWithFormat:@"%s%s%s", ztstname[sel.ztst], zwedesc, datedesc]];
 		m_dss_hw[i] = MRCTransfer([m_dev.dev newDepthStencilStateWithDescriptor:dssdesc]);
 	}
+	AmethystMTLLog(@"Depth stencil setup done");
 
 	// Init HW Vertex Shaders
+	AmethystMTLLog(@"HW vertex shaders begin");
 	for (size_t i = 0; i < std::size(m_hw_vs); i++)
 	{
 		VSSelector sel;
@@ -1092,8 +1159,10 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 		}
 		m_hw_vs[i] = LoadShader(shader);
 	}
+	AmethystMTLLog(@"HW vertex shaders done");
 
 	// Init pipelines
+	AmethystMTLLog(@"Fixed pipelines begin");
 	auto vs_convert = LoadShader(@"vs_convert");
 	auto fs_triangle = LoadShader(@"fs_triangle");
 	auto ps_copy = LoadShader(@"ps_copy");
@@ -1245,8 +1314,10 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	pdesc.vertexDescriptor.layouts[0].stride = sizeof(ImDrawVert);
 	pdesc.colorAttachments[0].pixelFormat = layer_px_fmt;
 	m_imgui_pipeline = MakePipeline(pdesc, LoadShader(@"vs_imgui"), LoadShader(@"ps_imgui"), @"imgui");
+	AmethystMTLLog(@"Fixed pipelines done");
 
 	[initCommands commit];
+	AmethystMTLLog(@"Create done");
 	return true;
 }}
 
@@ -1342,6 +1413,8 @@ static bool s_capture_next = false;
 
 GSDevice::PresentResult GSDeviceMTL::BeginPresent(bool frame_skip)
 { @autoreleasepool {
+	static int s_amethyst_present_logs = 0;
+	static int s_amethyst_next_drawable_logs = 0;
 	if (m_capture_start_frame && FrameNo() == m_capture_start_frame)
 		s_capture_next = true;
 	if (frame_skip || m_window_info.type == WindowInfo::Type::Surfaceless || !g_gs_device)
@@ -1350,7 +1423,20 @@ GSDevice::PresentResult GSDeviceMTL::BeginPresent(bool frame_skip)
 		return PresentResult::FrameSkipped;
 	}
 	id<MTLCommandBuffer> buf = GetRenderCmdBuf();
+	const auto drawable_start = std::chrono::steady_clock::now();
 	m_current_drawable = MRCRetain([m_layer nextDrawable]);
+	const auto drawable_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::steady_clock::now() - drawable_start).count();
+	if (drawable_elapsed_ms > 100 || s_amethyst_next_drawable_logs < 16 || !m_current_drawable)
+	{
+		AmethystMTLLog(@"nextDrawable frame=%u elapsedMs=%lld drawable=%@ layer=%p",
+			FrameNo(), static_cast<long long>(drawable_elapsed_ms), m_current_drawable.Get(), m_layer.Get());
+		if (s_amethyst_next_drawable_logs < 16)
+			s_amethyst_next_drawable_logs++;
+	}
+	if (s_amethyst_present_logs < 8)
+		AmethystMTLLog(@"BeginPresent frame=%u skip=%d drawable=%@ layer=%p drawableSize=%@",
+			FrameNo(), frame_skip, m_current_drawable.Get(), m_layer.Get(), NSStringFromCGSize([m_layer drawableSize]));
 	EndRenderPass();
 	if (!m_current_drawable)
 	{
@@ -1364,6 +1450,7 @@ GSDevice::PresentResult GSDeviceMTL::BeginPresent(bool frame_skip)
 	id<MTLRenderCommandEncoder> enc = [buf renderCommandEncoderWithDescriptor:m_pass_desc];
 	[enc setLabel:@"Present"];
 	m_current_render.encoder = MRCRetain(enc);
+	s_amethyst_present_logs++;
 	return PresentResult::OK;
 }}
 
@@ -2190,6 +2277,10 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 	GSTexture* primid_tex = nullptr;
 	GSTexture* rt = config.rt;
 	GSTexture* colclip_rt = g_gs_device->GetColorClipTexture();
+	GSTexture* rt_clone = nullptr;
+	GSTexture* original_tex = config.tex;
+	GSTexture* sampled_rt = nullptr;
+	bool bind_sampled_rt = false;
 	
 	if (colclip_rt)
 	{
@@ -2302,13 +2393,41 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 		return;
 	}
 
+	if (!m_features.texture_barrier && (config.require_one_barrier || config.require_full_barrier || (config.tex && config.tex == config.rt)))
+	{
+		const GSVector2i rtsize = rt->GetSize();
+		rt_clone = CreateTexture(rtsize.x, rtsize.y, 1, colclip_rt ? GSTexture::Format::ColorClip : GSTexture::Format::Color, true);
+		if (rt_clone)
+		{
+			FlushClears(rt);
+			const GSVector4i copy_rect = config.drawarea.rintersect(rt->GetRect());
+			CopyRect(rt, rt_clone, copy_rect, copy_rect.x, copy_rect.y);
+			if (config.require_one_barrier || config.require_full_barrier)
+			{
+				sampled_rt = rt_clone;
+				bind_sampled_rt = true;
+			}
+			if (config.tex == config.rt)
+				config.tex = rt_clone;
+			config.require_one_barrier = false;
+			config.require_full_barrier = false;
+			config.drawlist = nullptr;
+		}
+		else
+		{
+			Console.Warning("Metal: Failed to allocate temp texture for RT barrier copy.");
+		}
+	}
+
 	BeginRenderPass(@"RenderHW", rt, MTLLoadActionLoad, config.ds, MTLLoadActionLoad, stencil, MTLLoadActionLoad);
 	id<MTLRenderCommandEncoder> mtlenc = m_current_render.encoder;
 	FlushDebugEntries(mtlenc);
 	if (usesStencil(config.destination_alpha))
 		[mtlenc setStencilReferenceValue:1];
 	MREInitHWDraw(config, allocation);
-	if (config.require_one_barrier || config.require_full_barrier)
+	if (bind_sampled_rt)
+		MRESetTexture(sampled_rt, GSMTLTextureIndexRenderTarget);
+	else if (config.require_one_barrier || config.require_full_barrier)
 		MRESetTexture(rt, GSMTLTextureIndexRenderTarget);
 	if (primid_tex)
 		MRESetTexture(primid_tex, GSMTLTextureIndexPrimIDs);
@@ -2349,6 +2468,11 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 
 	if (primid_tex)
 		Recycle(primid_tex);
+	if (rt_clone)
+	{
+		config.tex = original_tex;
+		Recycle(rt_clone);
+	}
 }}
 
 void GSDeviceMTL::SendHWDraw(GSHWDrawConfig& config, id<MTLRenderCommandEncoder> enc, id<MTLBuffer> buffer, size_t off)

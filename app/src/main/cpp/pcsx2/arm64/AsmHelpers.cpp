@@ -69,8 +69,14 @@ namespace a64 = vixl::aarch64;
 
 thread_local a64::MacroAssembler* armAsm;
 thread_local u8* armAsmPtr;
+thread_local u8* armAsmWritePtr;
 thread_local size_t armAsmCapacity;
 thread_local ArmConstantPool* armConstantPool;
+
+#if defined(PCSX2_IOS)
+extern "C" void* AMIOSGetJITWriteAlias(void* address);
+extern "C" void AMIOSPrepareJITRegion(void* address, size_t size);
+#endif
 
 #ifdef INCLUDE_DISASSEMBLER
 static std::mutex armDisasmMutex;
@@ -82,6 +88,16 @@ void armSetAsmPtr(void* ptr, size_t capacity, ArmConstantPool* pool)
 {
 	pxAssert(!armAsm);
 	armAsmPtr = static_cast<u8*>(ptr);
+#if defined(PCSX2_IOS)
+	// On iOS 26 TXM, the executable region is a TXM-blessed RX page returned by
+	// JIT26PrepareRegion(NULL, size). Direct writes to it fault. HostSys::Mmap
+	// registers a vm_remap RW alias for the same physical pages — resolve to it
+	// for writes; FlushInstructionCache + sys_icache_invalidate on the exec base
+	// after each block keeps TXM happy.
+	armAsmWritePtr = static_cast<u8*>(AMIOSGetJITWriteAlias(armAsmPtr));
+#else
+	armAsmWritePtr = armAsmPtr;
+#endif
 	armAsmCapacity = capacity;
 	armConstantPool = pool;
 }
@@ -92,20 +108,35 @@ void armAlignAsmPtr()
 	static constexpr uintptr_t ALIGNMENT = 16;
 	u8* new_ptr = reinterpret_cast<u8*>((reinterpret_cast<uintptr_t>(armAsmPtr) + (ALIGNMENT - 1)) & ~(ALIGNMENT - 1));
 	pxAssert(static_cast<size_t>(new_ptr - armAsmPtr) <= armAsmCapacity);
-	armAsmCapacity -= (new_ptr - armAsmPtr);
+	const ptrdiff_t adjustment = new_ptr - armAsmPtr;
+	armAsmCapacity -= adjustment;
 	armAsmPtr = new_ptr;
+	armAsmWritePtr += adjustment;
 }
 
 u8* armStartBlock()
 {
 	armAlignAsmPtr();
 
+#if defined(PCSX2_IOS)
+	// Pre-bless upcoming pages BEFORE the recompiler writes code. The bless
+	// command writes 0x69 to byte 0 of each blessed page, so blessing after
+	// code is written clobbers byte 0. Bless 256 KB ahead; watermark in
+	// AMIOSPrepareExecutableRegion ensures no page is re-blessed.
+	{
+		constexpr size_t kPreBlessAhead = 256u * 1024u;
+		const size_t cap = armAsmCapacity < kPreBlessAhead ? armAsmCapacity : kPreBlessAhead;
+		AMIOSPrepareJITRegion(armAsmPtr, cap);
+	}
+#endif
+
 	HostSys::BeginCodeWrite();
 
 	pxAssert(!armAsm);
-	armAsm = new vixl::aarch64::MacroAssembler(static_cast<vixl::byte*>(armAsmPtr), armAsmCapacity);
+	armAsm = new vixl::aarch64::MacroAssembler(static_cast<vixl::byte*>(armAsmWritePtr), armAsmCapacity);
 	armAsm->GetScratchVRegisterList()->Remove(31);
 	armAsm->GetScratchRegisterList()->Remove(RSCRATCHADDR.GetCode());
+	armAsm->bti(a64::EmitBTI_jc);
 	return armAsmPtr;
 }
 
@@ -126,6 +157,7 @@ u8* armEndBlock()
 	HostSys::FlushInstructionCache(armAsmPtr, size);
 
 	armAsmPtr = armAsmPtr + size;
+	armAsmWritePtr = armAsmWritePtr + size;
 	armAsmCapacity -= size;
 	return armAsmPtr;
 }

@@ -8,6 +8,8 @@
 #include "common/Console.h"
 #include "common/HostSys.h"
 
+#include <cstdio>
+
 const a64::Register& armWRegister(int n)
 {
     using namespace vixl::aarch64;
@@ -67,8 +69,14 @@ const a64::VRegister& armQRegister(int n)
 
 thread_local a64::MacroAssembler* armAsm;
 thread_local u8* armAsmPtr;
+thread_local u8* armAsmWritePtr;
 thread_local size_t armAsmCapacity;
 thread_local ArmConstantPool* armConstantPool;
+
+#if defined(PCSX2_IOS)
+extern "C" void* AMIOSGetJITWriteAlias(void* address);
+extern "C" void AMIOSPrepareJITRegion(void* address, size_t size);
+#endif
 
 #ifdef INCLUDE_DISASSEMBLER
 static std::mutex armDisasmMutex;
@@ -80,6 +88,12 @@ void armSetAsmPtr(void* ptr, size_t capacity, ArmConstantPool* pool)
 {
     pxAssert(!armAsm);
     armAsmPtr = static_cast<u8*>(ptr);
+#if defined(PCSX2_IOS)
+    // Mirror RW alias of TXM-blessed exec page (see AsmHelpers.cpp variant).
+    armAsmWritePtr = static_cast<u8*>(AMIOSGetJITWriteAlias(armAsmPtr));
+#else
+    armAsmWritePtr = armAsmPtr;
+#endif
     armAsmCapacity = capacity;
     armConstantPool = pool;
 }
@@ -90,20 +104,31 @@ void armAlignAsmPtr()
     static constexpr uintptr_t ALIGNMENT = 16;
     u8* new_ptr = reinterpret_cast<u8*>((reinterpret_cast<uintptr_t>(armAsmPtr) + (ALIGNMENT - 1)) & ~(ALIGNMENT - 1));
     pxAssert(static_cast<size_t>(new_ptr - armAsmPtr) <= armAsmCapacity);
-    armAsmCapacity -= (new_ptr - armAsmPtr);
+    const ptrdiff_t adjustment = new_ptr - armAsmPtr;
+    armAsmCapacity -= adjustment;
     armAsmPtr = new_ptr;
+    armAsmWritePtr += adjustment;
 }
 
 u8* armStartBlock()
 {
     armAlignAsmPtr();
 
+#if defined(PCSX2_IOS)
+    {
+        constexpr size_t kPreBlessAhead = 256u * 1024u;
+        const size_t cap = armAsmCapacity < kPreBlessAhead ? armAsmCapacity : kPreBlessAhead;
+        AMIOSPrepareJITRegion(armAsmPtr, cap);
+    }
+#endif
+
     HostSys::BeginCodeWrite();
 
     pxAssert(!armAsm);
-    armAsm = new a64::MacroAssembler(static_cast<vixl::byte*>(armAsmPtr), armAsmCapacity);
+    armAsm = new a64::MacroAssembler(static_cast<vixl::byte*>(armAsmWritePtr), armAsmCapacity);
     armAsm->GetScratchVRegisterList()->Remove(31);
     armAsm->GetScratchRegisterList()->Remove(RSCRATCHADDR.GetCode());
+    armAsm->bti(a64::EmitBTI_jc);
     return armAsmPtr;
 }
 
@@ -112,7 +137,6 @@ u8* armEndBlock()
     pxAssert(armAsm);
 
     armAsm->FinalizeCode();
-
     const u32 size = static_cast<u32>(armAsm->GetSizeOfCodeGenerated());
     pxAssert(size < armAsmCapacity);
 
@@ -124,6 +148,7 @@ u8* armEndBlock()
     HostSys::FlushInstructionCache(armAsmPtr, size);
 
     armAsmPtr = armAsmPtr + size;
+    armAsmWritePtr = armAsmWritePtr + size;
     armAsmCapacity -= size;
     return armAsmPtr;
 }
@@ -518,7 +543,11 @@ void armEmitJmpPtr(void* code, const void* dst, bool flush_icache)
     const s64 displacement = GetPCDisplacement(code, dst);
 
     u32 new_code = a64::B | a64::Assembler::ImmUncondBranch(displacement);
+#if defined(PCSX2_IOS)
+    std::memcpy(AMIOSGetJITWriteAlias(code), &new_code, sizeof(new_code));
+#else
     std::memcpy(code, &new_code, sizeof(new_code));
+#endif
 
     if (flush_icache) {
         HostSys::FlushInstructionCache(code, a64::kInstructionSize);

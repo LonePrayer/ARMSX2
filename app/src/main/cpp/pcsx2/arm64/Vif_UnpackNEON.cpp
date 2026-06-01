@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "Vif_UnpackNEON.h"
+#include "common/Console.h"
 #include "common/Perf.h"
 
 namespace a64 = vixl::aarch64;
@@ -383,33 +384,49 @@ void VifUnpackNEON_Simple::doMaskWrite(const vixl::aarch64::VRegister& regX) con
 // ecx = dest, edx = src
 static void nVifGen(int usn, int mask, int curCycle)
 {
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("nVifGen: enter usn={} mask={} cycle={}", usn, mask, curCycle);
 
 	int usnpart = usn * 2 * 16;
 	int maskpart = mask * 16;
 
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("nVifGen: construct generator begin.");
 	VifUnpackNEON_Simple vpugen(!!usn, !!mask, curCycle);
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("nVifGen: construct generator done.");
 
 	for (int i = 0; i < 16; ++i)
 	{
 		nVifCall& ucall(nVifUpk[((usnpart + maskpart + i) * 4) + curCycle]);
 		ucall = NULL;
 		if (nVifT[i] == 0)
+		{
+			ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("nVifGen: skip type={} nVifT=0", i);
 			continue;
+		}
 
+		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("nVifGen: armStartBlock begin type={}", i);
 		ucall = (nVifCall)armStartBlock();
+		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("nVifGen: xUnpack begin type={} ptr={}", i, static_cast<const void*>(reinterpret_cast<const void*>(ucall)));
 		vpugen.xUnpack(i);
+		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("nVifGen: xMovDest begin type={}", i);
 		vpugen.xMovDest();
+		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("nVifGen: ret begin type={}", i);
 		armAsm->Ret();
+		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("nVifGen: armEndBlock begin type={}", i);
 		armEndBlock();
+		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("nVifGen: armEndBlock done type={}", i);
 	}
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("nVifGen: leave usn={} mask={} cycle={}", usn, mask, curCycle);
 }
 
 void VifUnpackSSE_Init()
 {
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("VifUnpackSSE_Init: DevCon begin.");
 	DevCon.WriteLn("Generating NEON-optimized unpacking functions for VIF interpreters...");
-
-	HostSys::BeginCodeWrite();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("VifUnpackSSE_Init: armSetAsmPtr begin base={} end={}",
+		static_cast<const void*>(SysMemory::GetVIFUnpackRec()),
+		static_cast<const void*>(SysMemory::GetVIFUnpackRecEnd()));
 	armSetAsmPtr(SysMemory::GetVIFUnpackRec(), SysMemory::GetVIFUnpackRecEnd() - SysMemory::GetVIFUnpackRec(), nullptr);
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("VifUnpackSSE_Init: armSetAsmPtr done.");
 
 	for (int a = 0; a < 2; a++)
 	{
@@ -417,11 +434,14 @@ void VifUnpackSSE_Init()
 		{
 			for (int c = 0; c < 4; c++)
 			{
+				ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("VifUnpackSSE_Init: nVifGen begin usn={} mask={} cycle={}", a, b, c);
 				nVifGen(a, b, c);
+				ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("VifUnpackSSE_Init: nVifGen done usn={} mask={} cycle={}", a, b, c);
 			}
 		}
 	}
 
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("VifUnpackSSE_Init: Perf register begin.");
 	Perf::any.Register(SysMemory::GetVIFUnpackRec(), armGetAsmPtr() - SysMemory::GetVIFUnpackRec(), "VIF Unpack");
-	HostSys::EndCodeWrite();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("VifUnpackSSE_Init: Perf register done.");
 }

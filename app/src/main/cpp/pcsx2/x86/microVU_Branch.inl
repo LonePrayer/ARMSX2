@@ -3,8 +3,121 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
+#include "common/Console.h"
+#include "pcsx2/DebugTools/Debug.h"
+
 extern void mVUincCycles(microVU& mVU, int x);
 extern void* mVUcompile(microVU& mVU, u32 startPC, uptr pState);
+
+static constexpr u32 AMPS2_VU_DIAG_SAMPLE_MASK = 0xfffff;
+static std::atomic<bool> s_amethyst_microvu_diag_enabled{false};
+
+static bool AmethystRefreshMicroVUDiagEnabled()
+{
+	const char* value = std::getenv("AM_PS2_VU_DIAG");
+	const bool enabled = value && value[0] && value[0] != '0';
+	s_amethyst_microvu_diag_enabled.store(enabled, std::memory_order_relaxed);
+	return enabled;
+}
+
+static bool AmethystMicroVUDiagEnabled()
+{
+	return s_amethyst_microvu_diag_enabled.load(std::memory_order_relaxed);
+}
+
+static void AmethystVU1MicroFilePrintf(const char* format, ...)
+{
+	std::FILE* file = EmuFolders::OpenLogFile("vu1micro.log", "a");
+	if (!file)
+		return;
+
+	va_list args;
+	va_start(args, format);
+	std::vfprintf(file, format, args);
+	va_end(args);
+	std::fclose(file);
+}
+
+static void AmethystDumpVU1MicroWindowFromRecEnd(const char* label, u32 pc)
+{
+	if (!VU1.Micro)
+	{
+		Console.WriteLn("AMPS2 VU1Micro %s unavailable tpc=0x%08x branch=0x%08x stat=0x%08x vu1Micro=%p",
+			label, VU1.VI[REG_TPC].UL, microVU1.branch, VU0.VI[REG_VPU_STAT].UL, VU1.Micro);
+		AmethystVU1MicroFilePrintf("AMPS2 VU1Micro %s unavailable tpc=0x%08x branch=0x%08x stat=0x%08x vu1Micro=%p\n",
+			label, VU1.VI[REG_TPC].UL, microVU1.branch, VU0.VI[REG_VPU_STAT].UL, VU1.Micro);
+		std::fprintf(stderr, "AMPS2 VU1Micro %s unavailable tpc=0x%08x branch=0x%08x stat=0x%08x vu1Micro=%p\n",
+			label, VU1.VI[REG_TPC].UL, microVU1.branch, VU0.VI[REG_VPU_STAT].UL, VU1.Micro);
+		std::fflush(stderr);
+		return;
+	}
+
+	const u32 base = pc & ~0x3f;
+	Console.WriteLn("AMPS2 VU1Micro %s base=0x%04x tpc=0x%08x branch=0x%08x bad=0x%08x evil=0x%08x evilevil=0x%08x flags=0x%08x stat=0x%08x",
+		label, base, VU1.VI[REG_TPC].UL, microVU1.branch, microVU1.badBranch, microVU1.evilBranch,
+		microVU1.evilevilBranch, microVU1.regs().flags, VU0.VI[REG_VPU_STAT].UL);
+	AmethystVU1MicroFilePrintf("AMPS2 VU1Micro %s base=0x%04x tpc=0x%08x branch=0x%08x bad=0x%08x evil=0x%08x evilevil=0x%08x flags=0x%08x stat=0x%08x\n",
+		label, base, VU1.VI[REG_TPC].UL, microVU1.branch, microVU1.badBranch, microVU1.evilBranch,
+		microVU1.evilevilBranch, microVU1.regs().flags, VU0.VI[REG_VPU_STAT].UL);
+	std::fprintf(stderr, "AMPS2 VU1Micro %s base=0x%04x tpc=0x%08x branch=0x%08x bad=0x%08x evil=0x%08x evilevil=0x%08x flags=0x%08x stat=0x%08x\n",
+		label, base, VU1.VI[REG_TPC].UL, microVU1.branch, microVU1.badBranch, microVU1.evilBranch,
+		microVU1.evilevilBranch, microVU1.regs().flags, VU0.VI[REG_VPU_STAT].UL);
+
+	for (u32 offset = 0; offset < 0x80; offset += 8)
+	{
+		const u32 byte_pc = (base + offset) & 0x3fff;
+		const u32 lower = *reinterpret_cast<const u32*>(&VU1.Micro[byte_pc]);
+		const u32 upper = *reinterpret_cast<const u32*>(&VU1.Micro[byte_pc + 4]);
+		const std::string upper_text = disVU1MicroUF(upper, byte_pc);
+		const std::string lower_text = disVU1MicroLF(lower, byte_pc);
+		Console.WriteLn("AMPS2 VU1Micro %s pc=0x%04x lower=0x%08x upper=0x%08x | %s | %s",
+			label, byte_pc, lower, upper, upper_text.c_str(), lower_text.c_str());
+		AmethystVU1MicroFilePrintf("AMPS2 VU1Micro %s pc=0x%04x lower=0x%08x upper=0x%08x | %s | %s\n",
+			label, byte_pc, lower, upper, upper_text.c_str(), lower_text.c_str());
+		std::fprintf(stderr, "AMPS2 VU1Micro %s pc=0x%04x lower=0x%08x upper=0x%08x | %s | %s\n",
+			label, byte_pc, lower, upper, upper_text.c_str(), lower_text.c_str());
+	}
+	std::fflush(stderr);
+}
+
+static void AmethystVU1RecEndDiag(u32 isEbit, u32 tpc, u32 vpuStat)
+{
+	if (!AmethystMicroVUDiagEnabled())
+		return;
+
+	static std::atomic<u32> s_count{0};
+	const u32 count = s_count.fetch_add(1, std::memory_order_relaxed) + 1;
+	if (count <= 128 || ((count & AMPS2_VU_DIAG_SAMPLE_MASK) == 0))
+	{
+		std::fprintf(stderr, "AMPS2 VU1Rec end #%u isEbit=%u tpc=0x%08x vpuStat=0x%08x vu1Cycle=%u nextBlock=%u\n",
+			count, isEbit, tpc, vpuStat, VU1.cycle, VU1.nextBlockCycles);
+		std::fflush(stderr);
+	}
+
+	if (!isEbit && (vpuStat & 0x100) && ((count & AMPS2_VU_DIAG_SAMPLE_MASK) == 0))
+	{
+		const u16 vi04 = VU1.VI[4].US[0];
+		const u16 vi12 = VU1.VI[12].US[0];
+		const u32 ilw_addr = ((static_cast<u32>(vi12) + 69u) & 0x3ffu) << 4;
+		const u16* ilw_ptr = reinterpret_cast<const u16*>(VU1.Mem + ilw_addr);
+		std::fprintf(stderr,
+			"AMPS2 VU1Rec state vi04=0x%04x vi12=0x%04x ilwAddr=0x%04x ilwHalf=[%04x,%04x,%04x,%04x,%04x,%04x,%04x,%04x]\n",
+			vi04, vi12, ilw_addr,
+			ilw_ptr[0], ilw_ptr[1], ilw_ptr[2], ilw_ptr[3],
+			ilw_ptr[4], ilw_ptr[5], ilw_ptr[6], ilw_ptr[7]);
+		std::fflush(stderr);
+		AmethystDumpVU1MicroWindowFromRecEnd("rec-end-pc", tpc);
+		AmethystDumpVU1MicroWindowFromRecEnd("rec-end-zero", 0);
+		AmethystDumpVU1MicroWindowFromRecEnd("rec-end-0058", 0x58);
+	}
+}
+
 __fi int getLastFlagInst(microRegInfo& pState, int* xFlag, int flagType, int isEbit)
 {
 	if (isEbit)
@@ -169,6 +282,13 @@ void mVUDTendProgram(mV, microFlagCycles* mFC, int isEbit)
 
 	if (isEbit != 2) // Save PC, and Jump to Exit Point
 	{
+		if (isVU1 && !THREAD_VU1)
+		{
+			armAsm->Mov(RAX, static_cast<u32>(isEbit));
+			armAsm->Mov(RCX, xPC);
+			armAsm->Ldr(EDX, PTR_CPU(vuRegs[0].VI[REG_VPU_STAT].UL));
+			armEmitCall(reinterpret_cast<void*>(AmethystVU1RecEndDiag));
+		}
         if (mVU.index && THREAD_VU1) {
 //            xFastCall((void *) mVUTBit);
             armEmitCall(reinterpret_cast<void*>(mVUTBit));
@@ -341,6 +461,13 @@ void mVUendProgram(mV, microFlagCycles* mFC, int isEbit)
 
 	if (isEbit != 2 && isEbit != 3) // Save PC, and Jump to Exit Point
 	{
+		if (isVU1 && !THREAD_VU1)
+		{
+			armAsm->Mov(RAX, static_cast<u32>(isEbit));
+			armAsm->Mov(RCX, xPC);
+			armAsm->Ldr(EDX, PTR_CPU(vuRegs[0].VI[REG_VPU_STAT].UL));
+			armEmitCall(reinterpret_cast<void*>(AmethystVU1RecEndDiag));
+		}
         if (mVU.index && THREAD_VU1) {
 //            xFastCall((void *) mVUEBit);
             armEmitCall(reinterpret_cast<void*>(mVUEBit));

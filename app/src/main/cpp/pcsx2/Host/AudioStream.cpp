@@ -119,8 +119,10 @@ std::unique_ptr<AudioStream> AudioStream::CreateStream(AudioBackend backend, u32
 		case AudioBackend::SDL:
 			return CreateSDLAudioStream(sample_rate, parameters, stretch_enabled, error);
 
-        case AudioBackend::Oboe:
-            return CreateOboeAudioStream(sample_rate, parameters, stretch_enabled, error);
+#if defined(__ANDROID__)
+		case AudioBackend::Oboe:
+			return CreateOboeAudioStream(sample_rate, parameters, stretch_enabled, error);
+#endif
 
 		case AudioBackend::Null:
 			return CreateNullStream(sample_rate, parameters.buffer_ms);
@@ -152,11 +154,13 @@ static constexpr const std::array s_backend_names = {
 	"Null",
 	"Cubeb",
 	"SDL",
+	"Oboe",
 };
 static constexpr const std::array s_backend_display_names = {
 	TRANSLATE_NOOP("AudioStream", "Null (No Output)"),
 	TRANSLATE_NOOP("AudioStream", "Cubeb"),
 	TRANSLATE_NOOP("AudioStream", "SDL"),
+	TRANSLATE_NOOP("AudioStream", "Oboe"),
 };
 
 std::optional<AudioBackend> AudioStream::ParseBackendName(const char* str)

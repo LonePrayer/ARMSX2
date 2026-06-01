@@ -525,23 +525,36 @@ __fi bool dmacWrite32( u32 mem, mem32_t& value )
 		//Midway are a bunch of idiots, writing to E100 (reserved) instead of E010
 		//Which causes a CPCOND0 to fail.
 		case (DMAC_FAKESTAT):
-		case (DMAC_STAT):
-		{
-			if (mem == DMAC_FAKESTAT)
+			case (DMAC_STAT):
 			{
-				HW_LOG("Midways own DMAC_STAT Write 32bit %x", value);
-			}
-			else HW_LOG("DMAC_STAT Write 32bit %x", value);
+				const u32 old_stat = psHu32(DMAC_STAT);
+				if (mem == DMAC_FAKESTAT)
+				{
+					HW_LOG("Midways own DMAC_STAT Write 32bit %x", value);
+				}
+				else HW_LOG("DMAC_STAT Write 32bit %x", value);
 
 			// lower 16 bits: clear on 1
 			// upper 16 bits: reverse on 1
 
-			psHu16(0xe010) &= ~(value & 0xffff);
-			psHu16(0xe012) ^= (u16)(value >> 16);
+				psHu16(0xe010) &= ~(value & 0xffff);
+				psHu16(0xe012) ^= (u16)(value >> 16);
+				if ((old_stat & (1 << DMAC_GIF)) || (value & (1 << DMAC_GIF)) ||
+					((old_stat ^ psHu32(DMAC_STAT)) & (1 << DMAC_GIF)))
+				{
+					static u32 s_amethyst_dmac_stat_log_count = 0;
+					if ((s_amethyst_dmac_stat_log_count < 128) || ((s_amethyst_dmac_stat_log_count & 0xfff) == 0))
+					{
+						Console.WriteLn("AMPS2 DMAC_STAT write mem=0x%08x value=0x%08x pc=0x%08x cycle=%u before=0x%08x after=0x%08x interrupt=0x%08x status=0x%08x cause=0x%08x",
+							mem, value, cpuRegs.pc, cpuRegs.cycle, old_stat, psHu32(DMAC_STAT),
+							cpuRegs.interrupt, cpuRegs.CP0.n.Status.val, cpuRegs.CP0.n.Cause);
+					}
+					++s_amethyst_dmac_stat_log_count;
+				}
 
-			cpuTestDMACInts();
-			return false;
-		}
+				cpuTestDMACInts();
+				return false;
+			}
 
 		case (DMAC_ENABLEW):
 		{

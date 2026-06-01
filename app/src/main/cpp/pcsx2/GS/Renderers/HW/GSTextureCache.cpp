@@ -29,6 +29,7 @@
 std::unique_ptr<GSTextureCache> g_texture_cache;
 
 static u8* s_unswizzle_buffer;
+static int s_amethyst_display_lookup_logs = 0;
 
 /// List of candidates for purging when the hash cache gets too large.
 static std::vector<std::pair<GSTextureCache::HashCacheMap::iterator, s32>> s_hash_cache_purge_list;
@@ -3653,7 +3654,20 @@ GSTextureCache::Target* GSTextureCache::LookupDisplayTarget(GIFRegTEX0 TEX0, con
 {
 	Target* dst = LookupTarget(TEX0, size, scale, RenderTarget, true, 0, true);
 	if (dst)
+	{
+		if (s_amethyst_display_lookup_logs < 96)
+		{
+			Console.WriteLn("AMPS2 TC display hit frame=%llu bp=0x%05x fbw=%u psm=%s req=%dx%d targetBp=0x%05x targetFbw=%u targetSize=%dx%d tex=%dx%d valid=%d,%d-%d,%d scale=%.2f",
+				static_cast<unsigned long long>(g_perfmon.GetFrame()), static_cast<unsigned>(TEX0.TBP0),
+				static_cast<unsigned>(TEX0.TBW), psm_str(TEX0.PSM), size.x, size.y,
+				static_cast<unsigned>(dst->m_TEX0.TBP0), static_cast<unsigned>(dst->m_TEX0.TBW),
+				dst->m_unscaled_size.x, dst->m_unscaled_size.y,
+				dst->m_texture ? dst->m_texture->GetWidth() : 0, dst->m_texture ? dst->m_texture->GetHeight() : 0,
+				dst->m_valid.x, dst->m_valid.y, dst->m_valid.z, dst->m_valid.w, dst->m_scale);
+			s_amethyst_display_lookup_logs++;
+		}
 		return dst;
+	}
 
 	// Didn't find a target, check if the frame was uploaded.
 
@@ -3724,6 +3738,37 @@ GSTextureCache::Target* GSTextureCache::LookupDisplayTarget(GIFRegTEX0 TEX0, con
 			else
 				++iter;
 		}
+	}
+
+	if (s_amethyst_display_lookup_logs < 128 || ((g_perfmon.GetFrame() % 120) == 0))
+	{
+		Console.WriteLn("AMPS2 TC display miss frame=%llu bp=0x%05x fbw=%u psm=%s req=%dx%d scale=%.2f feedback=%d canCreate=%d transfers=%zu targets=%zu",
+			static_cast<unsigned long long>(g_perfmon.GetFrame()), static_cast<unsigned>(TEX0.TBP0),
+			static_cast<unsigned>(TEX0.TBW), psm_str(TEX0.PSM), size.x, size.y, scale,
+			is_feedback ? 1 : 0, can_create ? 1 : 0, GSRendererHW::GetInstance()->m_draw_transfers.size(),
+			m_dst[RenderTarget].size());
+
+		int shown = 0;
+		for (Target* target : m_dst[RenderTarget])
+		{
+			if (shown >= 8)
+				break;
+
+			const s32 delta = static_cast<s32>(TEX0.TBP0) - static_cast<s32>(target->m_TEX0.TBP0);
+			if (std::abs(delta) > 0x1000 && shown >= 4)
+				continue;
+
+			Console.WriteLn("AMPS2 TC target[%d] bp=0x%05x end=0x%05x fbw=%u psm=%s size=%dx%d tex=%dx%d age=%d lastDraw=%d valid=%d,%d-%d,%d used=%d frame=%d dirty=%d",
+				shown, static_cast<unsigned>(target->m_TEX0.TBP0), static_cast<unsigned>(target->m_end_block),
+				static_cast<unsigned>(target->m_TEX0.TBW), psm_str(target->m_TEX0.PSM),
+				target->m_unscaled_size.x, target->m_unscaled_size.y,
+				target->m_texture ? target->m_texture->GetWidth() : 0, target->m_texture ? target->m_texture->GetHeight() : 0,
+				target->m_age, target->m_last_draw, target->m_valid.x, target->m_valid.y,
+				target->m_valid.z, target->m_valid.w, target->m_used ? 1 : 0, target->m_is_frame ? 1 : 0,
+				target->m_dirty.empty() ? 0 : 1);
+			shown++;
+		}
+		s_amethyst_display_lookup_logs++;
 	}
 
 	return can_create ? CreateTarget(TEX0, new_size, new_size, scale, RenderTarget, true, 0, true) : nullptr;

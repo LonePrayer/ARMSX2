@@ -7,7 +7,11 @@
 #include "common/Console.h"
 #include "common/Error.h"
 
+#define SDL_MAIN_HANDLED
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
+
+#include <atomic>
 
 namespace
 {
@@ -39,6 +43,7 @@ static bool InitializeSDLAudio(Error* error)
 
 	// Set the name that shows up in the audio mixers on some platforms
 	SDL_SetHint("SDL_AUDIO_DEVICE_APP_NAME", "PCSX2");
+	SDL_SetMainReady();
 
 	// May as well keep it alive until the process exits.
 	if (!SDL_InitSubSystem(SDL_INIT_AUDIO))
@@ -109,6 +114,11 @@ bool SDLAudioStream::OpenDevice(bool stretch_enabled, Error* error)
 
 	const SDL_AudioSpec spec = {SDL_AUDIO_S16LE, m_output_channels, static_cast<int>(m_sample_rate)};
 	m_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, AudioCallback, static_cast<void*>(this));
+	if (!m_stream)
+	{
+		Error::SetStringFmt(error, "SDL_OpenAudioDeviceStream() failed: {}", SDL_GetError());
+		return false;
+	}
 
 	SDL_AudioSpec obtained_spec = {};
 	int obtained_samples = 0;
@@ -119,7 +129,15 @@ bool SDLAudioStream::OpenDevice(bool stretch_enabled, Error* error)
 		DEV_LOG("SDL_GetAudioDeviceFormat() failed {}", SDL_GetError());
 
 	BaseInitialize(sample_readers[static_cast<size_t>(m_parameters.expansion_mode)], stretch_enabled);
-	SDL_ResumeAudioDevice(SDL_GetAudioStreamDevice(m_stream));
+	const SDL_AudioDeviceID device = SDL_GetAudioStreamDevice(m_stream);
+	if (!SDL_ResumeAudioDevice(device))
+	{
+		Error::SetStringFmt(error, "SDL_ResumeAudioDevice() failed: {}", SDL_GetError());
+		return false;
+	}
+
+	INFO_LOG("SDL audio stream opened, device = {}, sample rate = {}, channels = {}, buffer = {} frames",
+		device, m_sample_rate, m_output_channels, samples);
 
 	return true;
 }
@@ -148,6 +166,13 @@ void SDLAudioStream::AudioCallback(void* userdata, SDL_AudioStream* stream, int 
 	if (additional_amount > 0)
 	{
 		SDLAudioStream* const this_ptr = static_cast<SDLAudioStream*>(userdata);
+		static std::atomic<int> s_callback_logs{0};
+		const int callback_log = s_callback_logs.fetch_add(1, std::memory_order_relaxed);
+		if (callback_log < 3)
+		{
+			INFO_LOG("SDL audio callback #{}, additional = {}, total = {}, channels = {}",
+				callback_log + 1, additional_amount, total_amount, this_ptr->m_output_channels);
+		}
 
 		const u32 num_frames = additional_amount / sizeof(SampleType) / this_ptr->m_output_channels;
 		SampleType* buffer = SDL_stack_alloc(SampleType, additional_amount / sizeof(SampleType));

@@ -24,8 +24,12 @@
 #include "fmt/format.h"
 #include "IconsFontAwesome5.h"
 
+#include <limits>
+
 #include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <thread>
 #include <mutex>
@@ -42,6 +46,110 @@ static std::deque<std::thread> s_screenshot_threads;
 static std::mutex s_screenshot_threads_mutex;
 
 std::unique_ptr<GSRenderer> g_gs_renderer;
+
+static bool AmethystRenderDiagEnabled()
+{
+	static const bool s_enabled = []() {
+		const char* value = std::getenv("AM_PS2_RENDER_DIAG");
+		return value && value[0] != '\0' && std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+			std::strcmp(value, "FALSE") != 0;
+	}();
+	return s_enabled;
+}
+
+static bool AmethystPresentTextureSampleEnabled()
+{
+	static const bool s_enabled = []() {
+		const char* value = std::getenv("AM_PS2_PRESENT_SAMPLE");
+		return value && value[0] != '\0' && std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+			std::strcmp(value, "FALSE") != 0;
+	}();
+	return s_enabled;
+}
+
+static void AmethystLogPresentTextureSample(GSTexture* current, const GSVector4i& src_rect, const GSVector4& draw_rect, const GSVector2i& real_size)
+{
+	static int s_sample_logs = 0;
+	static u64 s_last_sample_frame = std::numeric_limits<u64>::max();
+
+	const u64 frame = g_perfmon.GetFrame();
+	if (s_sample_logs >= 24 && (frame == s_last_sample_frame || (frame % 120) != 0))
+		return;
+
+	const int sample_width = std::min(src_rect.width(), 64);
+	const int sample_height = std::min(src_rect.height(), 64);
+	if (sample_width <= 0 || sample_height <= 0)
+		return;
+
+	const int sample_x = src_rect.x + ((src_rect.width() - sample_width) / 2);
+	const int sample_y = src_rect.y + ((src_rect.height() - sample_height) / 2);
+	const GSVector4i sample_src(sample_x, sample_y, sample_x + sample_width, sample_y + sample_height);
+	const GSVector4i sample_dst(0, 0, sample_width, sample_height);
+
+	std::unique_ptr<GSDownloadTexture> dl(g_gs_device->CreateDownloadTexture(sample_width, sample_height, current->GetFormat()));
+	if (!dl)
+	{
+		Host::ReportInfoAsync("AmethystRender",
+			fmt::format("Present sample frame={} failed=create-download current={}x{} format={}",
+				frame, current->GetWidth(), current->GetHeight(), GSTexture::GetFormatName(current->GetFormat())));
+		return;
+	}
+
+	dl->CopyFromTexture(sample_dst, current, sample_src, 0);
+	dl->Flush();
+	if (!dl->Map(sample_dst))
+	{
+		Host::ReportInfoAsync("AmethystRender",
+			fmt::format("Present sample frame={} failed=map current={}x{} format={}",
+				frame, current->GetWidth(), current->GetHeight(), GSTexture::GetFormatName(current->GetFormat())));
+		return;
+	}
+
+	const u8* bits = dl->GetMapPointer();
+	const u32 pitch = dl->GetMapPitch();
+	u64 hash = 1469598103934665603ull;
+	u64 byte_sum = 0;
+	u32 nonzero_pixels = 0;
+	u32 alpha_nonzero_pixels = 0;
+	u32 first_pixel = 0;
+	u32 center_pixel = 0;
+	for (int y = 0; y < sample_height; y++)
+	{
+		const u8* row = bits + (static_cast<size_t>(y) * pitch);
+		for (int x = 0; x < sample_width; x++)
+		{
+			u32 pixel;
+			std::memcpy(&pixel, row + (x * sizeof(u32)), sizeof(pixel));
+			if (x == 0 && y == 0)
+				first_pixel = pixel;
+			if (x == sample_width / 2 && y == sample_height / 2)
+				center_pixel = pixel;
+			if ((pixel & 0x00ffffffu) != 0)
+				nonzero_pixels++;
+			if ((pixel & 0xff000000u) != 0)
+				alpha_nonzero_pixels++;
+			byte_sum += (pixel & 0xffu) + ((pixel >> 8) & 0xffu) + ((pixel >> 16) & 0xffu) + ((pixel >> 24) & 0xffu);
+			for (int b = 0; b < 4; b++)
+			{
+				hash ^= (pixel >> (b * 8)) & 0xffu;
+				hash *= 1099511628211ull;
+			}
+		}
+	}
+
+	Host::ReportInfoAsync("AmethystRender",
+		fmt::format("Present sample frame={} current={}x{} format={} real={}x{} src={}x{}@{},{} dst={}x{} nonzero={}/{} alpha={} sum={} hash=0x{:016X} first=0x{:08X} center=0x{:08X}",
+			frame, current->GetWidth(), current->GetHeight(), GSTexture::GetFormatName(current->GetFormat()),
+			real_size.x, real_size.y, src_rect.width(), src_rect.height(), sample_src.x, sample_src.y,
+			static_cast<int>(draw_rect.z - draw_rect.x), static_cast<int>(draw_rect.w - draw_rect.y),
+			nonzero_pixels, sample_width * sample_height, alpha_nonzero_pixels,
+			byte_sum, hash, first_pixel, center_pixel));
+
+	dl->Unmap();
+	s_last_sample_frame = frame;
+	if (s_sample_logs < 24)
+		s_sample_logs++;
+}
 
 // Since we read this on the EE thread, we can't put it in the renderer, because
 // we might be switching while the other thread reads it.
@@ -81,6 +189,12 @@ void GSRenderer::UpdateRenderFixes()
 
 bool GSRenderer::Merge(int field)
 {
+	static int s_amethyst_merge_disabled_logs = 0;
+	static int s_amethyst_merge_no_output_logs = 0;
+	static int s_amethyst_merge_output_logs = 0;
+	static u64 s_amethyst_last_disabled_frame = std::numeric_limits<u64>::max();
+	static u64 s_amethyst_last_no_output_frame = std::numeric_limits<u64>::max();
+	static u64 s_amethyst_last_output_frame = std::numeric_limits<u64>::max();
 	GSVector2i fs(0, 0);
 	GSTexture* tex[3] = { nullptr, nullptr, nullptr };
 	float tex_scale[3] = { 0.0f, 0.0f, 0.0f };
@@ -89,6 +203,19 @@ bool GSRenderer::Merge(int field)
 
 	if (!PCRTCDisplays.PCRTCDisplays[0].enabled && !PCRTCDisplays.PCRTCDisplays[1].enabled)
 	{
+		const u64 frame = g_perfmon.GetFrame();
+		if (AmethystRenderDiagEnabled() &&
+			(s_amethyst_merge_disabled_logs < 16 || (frame != s_amethyst_last_disabled_frame && (frame % 120) == 0)))
+		{
+			Host::ReportInfoAsync("AmethystRender",
+				fmt::format("Merge blank: displays disabled field={} frame={} pmode=0x{:016X} en1={} en2={} smode2=0x{:016X} display0=0x{:016X} dispfb0=0x{:016X} display1=0x{:016X} dispfb1=0x{:016X}",
+					field, frame, m_regs->PMODE.U64, static_cast<u32>(m_regs->PMODE.EN1), static_cast<u32>(m_regs->PMODE.EN2), m_regs->SMODE2.U64,
+					m_regs->DISP[0].DISPLAY.U64, m_regs->DISP[0].DISPFB.U64,
+					m_regs->DISP[1].DISPLAY.U64, m_regs->DISP[1].DISPFB.U64));
+			s_amethyst_last_disabled_frame = frame;
+			if (s_amethyst_merge_disabled_logs < 16)
+				s_amethyst_merge_disabled_logs++;
+		}
 		m_real_size = GSVector2i(0, 0);
 		return false;
 	}
@@ -117,6 +244,22 @@ bool GSRenderer::Merge(int field)
 
 	if (!tex[0] && !tex[1])
 	{
+		const u64 frame = g_perfmon.GetFrame();
+		if (AmethystRenderDiagEnabled() &&
+			(s_amethyst_merge_no_output_logs < 16 || (frame != s_amethyst_last_no_output_frame && (frame % 120) == 0)))
+		{
+			Host::ReportInfoAsync("AmethystRender",
+				fmt::format("Merge blank: no output field={} frame={} enabled0={} enabled1={} rect0={}x{} rect1={}x{} pmode=0x{:016X} display0=0x{:016X} dispfb0=0x{:016X} display1=0x{:016X} dispfb1=0x{:016X}",
+					field, frame,
+					PCRTCDisplays.PCRTCDisplays[0].enabled, PCRTCDisplays.PCRTCDisplays[1].enabled,
+					PCRTCDisplays.PCRTCDisplays[0].displayRect.width(), PCRTCDisplays.PCRTCDisplays[0].displayRect.height(),
+					PCRTCDisplays.PCRTCDisplays[1].displayRect.width(), PCRTCDisplays.PCRTCDisplays[1].displayRect.height(),
+					m_regs->PMODE.U64, m_regs->DISP[0].DISPLAY.U64, m_regs->DISP[0].DISPFB.U64,
+					m_regs->DISP[1].DISPLAY.U64, m_regs->DISP[1].DISPFB.U64));
+			s_amethyst_last_no_output_frame = frame;
+			if (s_amethyst_merge_no_output_logs < 16)
+				s_amethyst_merge_no_output_logs++;
+		}
 		m_real_size = GSVector2i(0, 0);
 
 		// Clear out the MAD buffer as some remnants of the previously shown frame came be left over, causing a flash for one frame.
@@ -213,6 +356,18 @@ bool GSRenderer::Merge(int field)
 	const GSVector2i resolution = PCRTCDisplays.GetResolution();
 	fs = GSVector2i(static_cast<int>(static_cast<float>(resolution.x) * GetUpscaleMultiplier()),
 		static_cast<int>(static_cast<float>(resolution.y) * GetUpscaleMultiplier()));
+	const u64 output_frame = g_perfmon.GetFrame();
+	if (AmethystRenderDiagEnabled() &&
+		(s_amethyst_merge_output_logs < 16 || (output_frame != s_amethyst_last_output_frame && (output_frame % 120) == 0)))
+	{
+		Host::ReportInfoAsync("AmethystRender",
+			fmt::format("Merge output field={} frame={} resolution={}x{} fs={}x{} tex0={} tex1={} scale0={:.2f} scale1={:.2f}",
+				field, output_frame, resolution.x, resolution.y, fs.x, fs.y,
+				tex[0] ? "yes" : "no", tex[1] ? "yes" : "no", tex_scale[0], tex_scale[1]));
+		s_amethyst_last_output_frame = output_frame;
+		if (s_amethyst_merge_output_logs < 16)
+			s_amethyst_merge_output_logs++;
+	}
 
 	m_real_size = GSVector2i(fs.x, fs.y);
 
@@ -514,9 +669,19 @@ void GSJoinSnapshotThreads()
 
 bool GSRenderer::BeginPresentFrame(bool frame_skip)
 {
+	static int s_amethyst_present_frame_logs = 0;
 	Host::BeginPresentFrame();
 
 	const GSDevice::PresentResult res = g_gs_device->BeginPresent(frame_skip);
+	if (AmethystRenderDiagEnabled() && s_amethyst_present_frame_logs < 16)
+	{
+		Host::ReportInfoAsync("AmethystRender",
+			fmt::format("BeginPresentFrame skip={} result={} frame={} window={}x{}",
+				frame_skip, static_cast<int>(res), g_perfmon.GetFrame(),
+				g_gs_device ? g_gs_device->GetWindowWidth() : 0,
+				g_gs_device ? g_gs_device->GetWindowHeight() : 0));
+		s_amethyst_present_frame_logs++;
+	}
 	if (res == GSDevice::PresentResult::FrameSkipped)
 	{
 		// If we're skipping a frame, we need to reset imgui's state, since
@@ -569,6 +734,16 @@ void GSRenderer::EndPresentFrame()
 
 void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 {
+	static int s_amethyst_vsync_logs = 0;
+	if (AmethystRenderDiagEnabled() && (s_amethyst_vsync_logs < 16 || ((g_perfmon.GetFrame() % 120) == 0)))
+	{
+		Host::ReportInfoAsync("AmethystRender",
+			fmt::format("VSync field={} frame={} registers={} idle={} skippedDup={}",
+				field, g_perfmon.GetFrame(), registers_written, idle_frame, m_skipped_duplicate_frames));
+		if (s_amethyst_vsync_logs < 16)
+			s_amethyst_vsync_logs++;
+	}
+
 	if (GSConfig.SaveInfo && GSConfig.ShouldDump(s_n, g_perfmon.GetFrame()))
 	{
 		DumpGSPrivRegs(*m_regs, GetDrawDumpPath("%05d_f%05lld_vsync_gs_reg.txt", s_n, g_perfmon.GetFrame()));
@@ -632,17 +807,19 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 		GSVector4i src_rect;
 		GSVector4 src_uv, draw_rect;
 		GSTexture* current = g_gs_device->GetCurrent();
-		if (current && !blank_frame)
-		{
-			src_rect = CalculateDrawSrcRect(current, m_real_size);
-			src_uv = GSVector4(src_rect) / GSVector4(current->GetSize()).xyxy();
-			draw_rect = CalculateDrawDstRect(g_gs_device->GetWindowWidth(), g_gs_device->GetWindowHeight(),
-				src_rect, current->GetSize(), s_display_alignment, g_gs_device->UsesLowerLeftOrigin(),
-				GetVideoMode() == GSVideoMode::SDTV_480P);
-			s_last_draw_rect = draw_rect;
-
-			if (GSConfig.CASMode != GSCASMode::Disabled)
+			if (current && !blank_frame)
 			{
+				src_rect = CalculateDrawSrcRect(current, m_real_size);
+				src_uv = GSVector4(src_rect) / GSVector4(current->GetSize()).xyxy();
+				draw_rect = CalculateDrawDstRect(g_gs_device->GetWindowWidth(), g_gs_device->GetWindowHeight(),
+					src_rect, current->GetSize(), s_display_alignment, g_gs_device->UsesLowerLeftOrigin(),
+					GetVideoMode() == GSVideoMode::SDTV_480P);
+				s_last_draw_rect = draw_rect;
+				if (AmethystPresentTextureSampleEnabled())
+					AmethystLogPresentTextureSample(current, src_rect, draw_rect, m_real_size);
+
+				if (GSConfig.CASMode != GSCASMode::Disabled)
+				{
 				static bool cas_log_once = false;
 				if (g_gs_device->Features().cas_sharpening)
 				{
@@ -660,6 +837,13 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 					cas_log_once = true;
 				}
 			}
+		}
+		else if (s_amethyst_vsync_logs < 24)
+		{
+			Host::ReportInfoAsync("AmethystRender",
+				fmt::format("VSync no present texture frame={} current={} blank={} real={}x{}",
+					g_perfmon.GetFrame(), current ? "yes" : "no", blank_frame, m_real_size.x, m_real_size.y));
+			s_amethyst_vsync_logs++;
 		}
 
 		if (BeginPresentFrame(false))
@@ -898,18 +1082,48 @@ void GSRenderer::PresentCurrentFrame()
 		GSTexture* current = g_gs_device->GetCurrent();
 		if (current)
 		{
+			static int s_amethyst_present_source_logs = 0;
+			static u64 s_amethyst_last_present_source_frame = std::numeric_limits<u64>::max();
 			const GSVector4i src_rect(CalculateDrawSrcRect(current, m_real_size));
 			const GSVector4 src_uv(GSVector4(src_rect) / GSVector4(current->GetSize()).xyxy());
 			const GSVector4 draw_rect(CalculateDrawDstRect(g_gs_device->GetWindowWidth(), g_gs_device->GetWindowHeight(),
 				src_rect, current->GetSize(), s_display_alignment, g_gs_device->UsesLowerLeftOrigin(),
 				GetVideoMode() == GSVideoMode::SDTV_480P));
-			s_last_draw_rect = draw_rect;
+				s_last_draw_rect = draw_rect;
+				const u64 frame = g_perfmon.GetFrame();
+				if (AmethystRenderDiagEnabled() &&
+					(s_amethyst_present_source_logs < 16 || (frame != s_amethyst_last_present_source_frame && (frame % 120) == 0)))
+				{
+					Host::ReportInfoAsync("AmethystRender",
+						fmt::format("Present source frame={} current={}x{} real={}x{} src={}x{} dst={}x{}",
+							frame, current->GetWidth(), current->GetHeight(), m_real_size.x, m_real_size.y,
+							src_rect.width(), src_rect.height(),
+							static_cast<int>(draw_rect.z - draw_rect.x), static_cast<int>(draw_rect.w - draw_rect.y)));
+					s_amethyst_last_present_source_frame = frame;
+					if (s_amethyst_present_source_logs < 16)
+						s_amethyst_present_source_logs++;
+				}
 
 			const u64 current_time = Common::Timer::GetCurrentValue();
 			const float shader_time = static_cast<float>(Common::Timer::ConvertValueToSeconds(current_time - m_shader_time_start));
 
 			g_gs_device->PresentRect(current, src_uv, nullptr, draw_rect,
 				s_tv_shader_indices[GSConfig.TVShader], shader_time, GSConfig.LinearPresent != GSPostBilinearMode::Off);
+		}
+		else
+		{
+			static int s_amethyst_present_null_logs = 0;
+			static u64 s_amethyst_last_present_null_frame = std::numeric_limits<u64>::max();
+			const u64 frame = g_perfmon.GetFrame();
+			if (AmethystRenderDiagEnabled() &&
+				(s_amethyst_present_null_logs < 16 || (frame != s_amethyst_last_present_null_frame && (frame % 120) == 0)))
+			{
+				Host::ReportInfoAsync("AmethystRender",
+					fmt::format("Present source missing frame={} real={}x{}", frame, m_real_size.x, m_real_size.y));
+				s_amethyst_last_present_null_frame = frame;
+				if (s_amethyst_present_null_logs < 16)
+					s_amethyst_present_null_logs++;
+			}
 		}
 
 		EndPresentFrame();

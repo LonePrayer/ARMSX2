@@ -75,6 +75,8 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -95,6 +97,17 @@
 
 namespace VMManager
 {
+	static void AMPS2Trace(const char* message)
+	{
+		static const bool enabled = []() {
+			const char* value = std::getenv("AM_PS2_JIT_DIAG");
+			return value && value[0] != '\0' && std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+				std::strcmp(value, "FALSE") != 0;
+		}();
+		if (enabled)
+			Host::ReportInfoAsync("AMPS2", message);
+	}
+
 	static void SetDefaultLoggingSettings(SettingsInterface& si);
 	static void UpdateLoggingSettings(SettingsInterface& si);
 
@@ -703,20 +716,29 @@ bool VMManager::Internal::CPUThreadInitialize()
 		ConsoleLogWriter<LOGLEVEL_INFO>::Error("cpuinfo_initialize() failed.");
 
 	LogCPUCapabilities();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("CPUThreadInitialize: CPU capability logging done.");
 
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("CPUThreadInitialize: SysMemory::Allocate begin.");
 	if (!SysMemory::Allocate())
 	{
 		Host::ReportErrorAsync("Error", "Failed to allocate VM memory.");
 		return false;
 	}
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("CPUThreadInitialize: SysMemory::Allocate done.");
 
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("CPUThreadInitialize: InitializeCPUProviders begin.");
 	InitializeCPUProviders();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("CPUThreadInitialize: InitializeCPUProviders done.");
 
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("CPUThreadInitialize: USBinit begin.");
 	USBinit();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("CPUThreadInitialize: USBinit done.");
 
 	// We want settings loaded so we choose the correct renderer for big picture mode.
 	// This also sorts out input sources.
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("CPUThreadInitialize: LoadSettings begin.");
 	LoadSettings();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("CPUThreadInitialize: LoadSettings done.");
 
 	if (EmuConfig.Achievements.Enabled && !Achievements::IsActive()) // this shit fucking explodes on android
 		Achievements::Initialize();
@@ -1785,16 +1807,33 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 	s_use_vsync_for_timing = false;
 
 	s_cpu_implementation_changed = false;
+	AMPS2Trace("VMManager::Initialize UpdateCPUImplementations begin");
 	UpdateCPUImplementations();
+	AMPS2Trace("VMManager::Initialize UpdateCPUImplementations done");
+	AMPS2Trace("VMManager::Initialize mmap_ResetBlockTracking begin");
 	mmap_ResetBlockTracking();
+	AMPS2Trace("VMManager::Initialize mmap_ResetBlockTracking done");
+	AMPS2Trace("VMManager::Initialize memSetExtraMemMode begin");
 	memSetExtraMemMode(EmuConfig.Cpu.ExtraMemory);
+	AMPS2Trace("VMManager::Initialize memSetExtraMemMode done");
+	AMPS2Trace("VMManager::Initialize ClearCPUExecutionCaches begin");
 	Internal::ClearCPUExecutionCaches();
+	AMPS2Trace("VMManager::Initialize ClearCPUExecutionCaches done");
+	AMPS2Trace("VMManager::Initialize FPControlRegister begin");
 	FPControlRegister::SetCurrent(EmuConfig.Cpu.FPUFPCR);
+	AMPS2Trace("VMManager::Initialize FPControlRegister done");
+	AMPS2Trace("VMManager::Initialize memBindConditionalHandlers begin");
 	memBindConditionalHandlers();
+	AMPS2Trace("VMManager::Initialize memBindConditionalHandlers done");
+	AMPS2Trace("VMManager::Initialize SysMemory::Reset begin");
 	SysMemory::Reset();
+	AMPS2Trace("VMManager::Initialize SysMemory::Reset done");
+	AMPS2Trace("VMManager::Initialize cpuReset begin");
 	cpuReset();
+	AMPS2Trace("VMManager::Initialize cpuReset done");
 
 	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("Opening GS...");
+	AMPS2Trace("VMManager::Initialize Opening GS begin");
 	s_gs_open_on_initialize = MTGS::IsOpen();
 	if (!s_gs_open_on_initialize && !MTGS::WaitForOpen())
 	{
@@ -1802,6 +1841,7 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("Failed to open GS.");
 		return false;
 	}
+	AMPS2Trace("VMManager::Initialize Opening GS done");
 
 	ScopedGuard close_gs = []() {
 		if (!s_gs_open_on_initialize)
@@ -2875,7 +2915,12 @@ void VMManager::LogCPUCapabilities()
 #endif
 
 #ifdef _M_ARM64
+#if defined(PCSX2_IOS)
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("Skipping runtime cache line check on iOS.");
+#else
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("Runtime cache line check begin.");
 	const size_t runtime_cache_line_size = HostSys::GetRuntimeCacheLineSize();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("Runtime cache line size = {}", runtime_cache_line_size);
 	if (__cachelinesize != runtime_cache_line_size)
 	{
 		// Not fatal, but does have performance implications.
@@ -2883,6 +2928,8 @@ void VMManager::LogCPUCapabilities()
 			"Cache line size mismatch. This build was compiled with {} byte lines, but the system has {} byte lines.",
 			__cachelinesize, runtime_cache_line_size);
 	}
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("Runtime cache line check done.");
+#endif
 #endif
 
 #if defined(_WIN32)
@@ -2894,16 +2941,26 @@ void VMManager::LogCPUCapabilities()
 void VMManager::InitializeCPUProviders()
 {
 //#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("InitializeCPUProviders: recCpu.Reserve begin.");
 	recCpu.Reserve();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("InitializeCPUProviders: recCpu.Reserve done.");
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("InitializeCPUProviders: psxRec.Reserve begin.");
 	psxRec.Reserve();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("InitializeCPUProviders: psxRec.Reserve done.");
 
 #ifdef PCSX2_ARM64_DYNAREC
 	// Reserve ARM64 EE dynarec if compiled in
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("InitializeCPUProviders: jitA64Cpu.Reserve begin.");
 	jitA64Cpu.Reserve();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("InitializeCPUProviders: jitA64Cpu.Reserve done.");
 #endif
 
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("InitializeCPUProviders: CpuMicroVU0.Reserve begin.");
 	CpuMicroVU0.Reserve();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("InitializeCPUProviders: CpuMicroVU0.Reserve done.");
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("InitializeCPUProviders: CpuMicroVU1.Reserve begin.");
 	CpuMicroVU1.Reserve();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("InitializeCPUProviders: CpuMicroVU1.Reserve done.");
 //#else
 //	// Despite not having any VU recompilers on ARM64, therefore no MTVU,
 //	// we still need the thread alive. Otherwise the read and write positions
@@ -2911,7 +2968,9 @@ void VMManager::InitializeCPUProviders()
 //	vu1Thread.Open();
 //#endif
 
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("InitializeCPUProviders: VifUnpackSSE_Init begin.");
 	VifUnpackSSE_Init();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("InitializeCPUProviders: VifUnpackSSE_Init done.");
 }
 
 void VMManager::ShutdownCPUProviders()
@@ -2990,22 +3049,38 @@ void VMManager::UpdateCPUImplementations()
 
 void VMManager::Internal::ClearCPUExecutionCaches()
 {
+	AMPS2Trace("ClearCPUExecutionCaches Cpu->Reset begin");
 	Cpu->Reset();
+	AMPS2Trace("ClearCPUExecutionCaches Cpu->Reset done");
+	AMPS2Trace("ClearCPUExecutionCaches psxCpu->Reset begin");
 	psxCpu->Reset();
+	AMPS2Trace("ClearCPUExecutionCaches psxCpu->Reset done");
 
 //#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
 	// mVU's VU0 needs to be properly initialized for macro mode even if it's not used for micro mode!
 	if (CHECK_EEREC && !EmuConfig.Cpu.Recompiler.EnableVU0)
+	{
+		AMPS2Trace("ClearCPUExecutionCaches CpuMicroVU0.Reset begin");
 		CpuMicroVU0.Reset();
+		AMPS2Trace("ClearCPUExecutionCaches CpuMicroVU0.Reset done");
+	}
 //#endif
 
+	AMPS2Trace("ClearCPUExecutionCaches CpuVU0->Reset begin");
 	CpuVU0->Reset();
+	AMPS2Trace("ClearCPUExecutionCaches CpuVU0->Reset done");
+	AMPS2Trace("ClearCPUExecutionCaches CpuVU1->Reset begin");
 	CpuVU1->Reset();
+	AMPS2Trace("ClearCPUExecutionCaches CpuVU1->Reset done");
 
 	if constexpr (newVifDynaRec)
 	{
+		AMPS2Trace("ClearCPUExecutionCaches dVifReset(0) begin");
 		dVifReset(0);
+		AMPS2Trace("ClearCPUExecutionCaches dVifReset(0) done");
+		AMPS2Trace("ClearCPUExecutionCaches dVifReset(1) begin");
 		dVifReset(1);
+		AMPS2Trace("ClearCPUExecutionCaches dVifReset(1) done");
 	}
 }
 
@@ -3194,8 +3269,17 @@ void VMManager::Internal::VSyncOnCPUThread()
 
 void VMManager::Internal::PollInputOnCPUThread()
 {
+	static u32 s_amethyst_poll_log_count = 0;
+	const bool log_poll = s_amethyst_poll_log_count < 96 ||
+		(g_FrameCount >= 300 && g_FrameCount <= 340);
+	if (log_poll)
+		Console.WriteLn("AMPS2 PollInput frame=%u phase=begin pc=0x%08x cycle=%u", g_FrameCount, cpuRegs.pc, cpuRegs.cycle);
 	Host::PumpMessagesOnCPUThread();
+	if (log_poll)
+		Console.WriteLn("AMPS2 PollInput frame=%u phase=after-pump pc=0x%08x cycle=%u", g_FrameCount, cpuRegs.pc, cpuRegs.cycle);
 	InputManager::PollSources();
+	if (log_poll)
+		Console.WriteLn("AMPS2 PollInput frame=%u phase=after-sources pc=0x%08x cycle=%u", g_FrameCount, cpuRegs.pc, cpuRegs.cycle);
 
 	if (EmuConfig.EnableRecordingTools)
 	{
@@ -3213,6 +3297,9 @@ void VMManager::Internal::PollInputOnCPUThread()
 		// so we can either read from it, or overwrite it!
 		g_InputRecording.handleControllerDataUpdate();
 	}
+	if (log_poll)
+		Console.WriteLn("AMPS2 PollInput frame=%u phase=end pc=0x%08x cycle=%u", g_FrameCount, cpuRegs.pc, cpuRegs.cycle);
+	++s_amethyst_poll_log_count;
 }
 
 void VMManager::CheckForCPUConfigChanges(const Pcsx2Config& old_config)

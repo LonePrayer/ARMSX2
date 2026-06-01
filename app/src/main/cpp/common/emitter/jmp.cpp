@@ -203,7 +203,7 @@ namespace x86Emitter
 			// This assert won't physically happen on x86 targets
 			pxAssertMsg(distance >= -0x80000000LL && distance < 0x80000000LL, "Jump target is too far away, needs an indirect register");
 
-			*bah = (s32)distance;
+			*xGetWritablePtr(bah) = (s32)distance;
 		}
 	}
 
@@ -247,12 +247,12 @@ namespace x86Emitter
 		if (opsize == 1)
 		{
 			pxAssertMsg(is_s8(displacement), "Emitter Error: Invalid short jump displacement.");
-			BasePtr[-1] = (s8)displacement;
+			*xGetWritablePtr(&BasePtr[-1]) = (s8)displacement;
 		}
 		else
 		{
 			// full displacement, no sanity checks needed :D
-			((s32*)BasePtr)[-1] = displacement;
+			*xGetWritablePtr(&((s32*)BasePtr)[-1]) = displacement;
 		}
 	}
 

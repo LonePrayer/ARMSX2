@@ -20,6 +20,7 @@
 #include "vtlb.h"
 #include "COP0.h"
 #include "Cache.h"
+#include "Config.h"
 #include "IopMem.h"
 #include "Host.h"
 #include "VMManager.h"
@@ -1057,6 +1058,9 @@ static void vtlb_RemoveFastmemMappings(u32 vaddr, u32 size)
 	pxAssert((vaddr & VTLB_PAGE_MASK) == 0);
 	pxAssert(size > 0 && (size & VTLB_PAGE_MASK) == 0);
 
+	if (s_fastmem_virtual_mapping.empty())
+		return;
+
 	const u32 num_pages = size / VTLB_PAGE_SIZE;
 	for (u32 i = 0; i < num_pages; i++, vaddr += VTLB_PAGE_SIZE)
 		vtlb_RemoveFastmemMapping(vaddr);
@@ -1389,6 +1393,13 @@ bool vtlb_Core_Alloc()
 	pxAssert(!vtlbdata.vmap && !vtlbdata.fastmem_base && !s_fastmem_area);
 
 	vtlbdata.vmap = reinterpret_cast<VTLBVirtual*>(SysMemory::GetVTLBVirtualMap());
+
+	if (!EmuConfig.Cpu.Recompiler.EnableFastmem)
+	{
+		vtlbdata.fastmem_base = 0;
+		DevCon.WriteLn(Color_StrongGreen, "Fastmem disabled; skipping 4GB fastmem area.");
+		return true;
+	}
 
 	pxAssert(!s_fastmem_area);
 	s_fastmem_area = SharedMemoryMappingArea::Create(FASTMEM_AREA_SIZE);

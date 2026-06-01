@@ -8,8 +8,11 @@
 #include "IopBios.h"
 #include "IopHw.h"
 #include "Common.h"
+#include "Host.h"
 #include "VMManager.h"
 
+#include <cstdlib>
+#include <cstring>
 #include <time.h>
 
 #ifndef _WIN32
@@ -25,6 +28,9 @@
 #include "common/Path.h"
 #include "common/Perf.h"
 #include "DebugTools/Breakpoints.h"
+
+// AMPS2: JIT dispatcher LDR diagnostic globals (defined in AmethystBridge.mm)
+extern "C" uint64_t g_amps2_jit_dispatch_rax;
 
 // #define DUMP_BLOCKS 1
 // #define TRACE_BLOCKS 1
@@ -44,6 +50,17 @@ using namespace x86Emitter;
 #endif
 
 extern void psxBREAK();
+
+static void AMPS2Trace(const char* message)
+{
+	static const bool enabled = []() {
+		const char* value = std::getenv("AM_PS2_JIT_DIAG");
+		return value && value[0] != '\0' && std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+			std::strcmp(value, "FALSE") != 0;
+	}();
+	if (enabled)
+		Host::ReportInfoAsync("AMPS2", message);
+}
 
 u32 g_psxMaxRecMem = 0;
 
@@ -171,6 +188,7 @@ static const void* _DynGen_JITCompile()
 
 //	u8* retval = xGetPtr();
     u8* retval = armGetCurrentCodePointer();
+    armAsm->bti(a64::EmitBTI_jc);
 
 //	xFastCall((void*)iopRecRecompile, ptr32[&psxRegs.pc]);
     armLoad(EAX, PTR_CPU(psxRegs.pc));
@@ -190,6 +208,10 @@ static const void* _DynGen_JITCompile()
     armAsm->Lsr(EAX, EAX, 2);
     armAsm->Ldr(RAX, a64::MemOperand(RCX, RAX, a64::LSL, 3));
     ////
+    // AMPS2 diag: capture raw loaded value to global before mask/BR
+    armMoveAddressToReg(a64::x16, &g_amps2_jit_dispatch_rax);
+    armAsm->Str(RAX, a64::MemOperand(a64::x16));
+    armAsm->And(RAX, RAX, 0xFFFFFFFFFFull);
     armAsm->Br(RAX);
 
 	return retval;
@@ -200,6 +222,7 @@ static const void* _DynGen_DispatcherReg()
 {
 //	u8* retval = xGetPtr();
     u8* retval = armGetCurrentCodePointer();
+    armAsm->bti(a64::EmitBTI_jc);
 
 //	xMOV(eax, ptr[&psxRegs.pc]);
 //	xMOV(ebx, eax);
@@ -215,6 +238,12 @@ static const void* _DynGen_DispatcherReg()
     armAsm->Lsr(EAX, EAX, 2);
     armAsm->Ldr(RAX, a64::MemOperand(RCX, RAX, a64::LSL, 3));
     ////
+    // AMPS2 diag: capture raw loaded value to global before mask/BR
+    armMoveAddressToReg(a64::x16, &g_amps2_jit_dispatch_rax);
+    armAsm->Str(RAX, a64::MemOperand(a64::x16));
+    // Mask off bits 40+ defensively. Loaded value somehow ends up with PAC-like high bits
+    // on iOS TXM JIT26 pages; mask preserves valid 40-bit user VAs.
+    armAsm->And(RAX, RAX, 0xFFFFFFFFFFull);
     armAsm->Br(RAX);
 
 	return retval;
@@ -231,6 +260,7 @@ static const void* _DynGen_EnterRecompiledCode()
 
 //	u8* retval = xGetPtr();
     u8* retval = armGetCurrentCodePointer();
+    armAsm->bti(a64::EmitBTI_jc);
 
 	{ // Properly scope the frame prologue/epilogue
 #ifdef ENABLE_VTUNE
@@ -241,6 +271,10 @@ static const void* _DynGen_EnterRecompiledCode()
 #endif
         armMoveAddressToReg(RSTATE_x26, iopMem->Main);
         armMoveAddressToReg(RSTATE_x29, &psxRecLUT);
+        // AMPS2: IOP also needs RSTATE_CPU pointing at the cpuRegistersPack for PTR_CPU(psxRegs.*)
+        // and RSTATE_PSX pointing at psxRegs. Without these, dispatcher LDR reads stale x27.
+        armMoveAddressToReg(RSTATE_CPU, &g_cpuRegistersPack);
+        armMoveAddressToReg(RSTATE_PSX, &psxRegs);
 
 //		xJMP((void*)iopDispatcherReg);
         armEmitJmp(iopDispatcherReg);
@@ -265,6 +299,7 @@ static void _DynGen_Dispatchers()
 	// Place the EventTest and DispatcherReg stuff at the top, because they get called the
 	// most and stand to benefit from strong alignment and direct referencing.
 	iopDispatcherEvent = armGetCurrentCodePointer();
+	armAsm->bti(a64::EmitBTI_jc);
 //	xFastCall((void*)recEventTest);
     armEmitCall(reinterpret_cast<void *>(recEventTest));
 	iopDispatcherReg = _DynGen_DispatcherReg();
@@ -940,21 +975,50 @@ static void recReserve()
 void recResetIOP()
 {
 	DevCon.WriteLn("iR3000A Recompiler reset.");
+	AMPS2Trace("recResetIOP begin");
 
 //	xSetPtr(SysMemory::GetIOPRec());
+	AMPS2Trace("recResetIOP armSetAsmPtr begin");
     armSetAsmPtr(SysMemory::GetIOPRec(), _4kb, nullptr);
+	AMPS2Trace("recResetIOP armSetAsmPtr done");
+	AMPS2Trace("recResetIOP armStartBlock begin");
     armStartBlock();
+	AMPS2Trace("recResetIOP armStartBlock done");
 
+	AMPS2Trace("recResetIOP _DynGen_Dispatchers begin");
 	_DynGen_Dispatchers();
+	AMPS2Trace("recResetIOP _DynGen_Dispatchers done");
 
 //	recPtr = xGetPtr();
+	AMPS2Trace("recResetIOP armEndBlock begin");
     recPtr = armEndBlock();
+	AMPS2Trace("recResetIOP armEndBlock done");
 
+	AMPS2Trace("recResetIOP iopClearRecLUT begin");
+	{
+		char b[200];
+		std::snprintf(b, sizeof(b),
+			"recResetIOP iopJITCompile=%p iopDispatcherReg=%p iopEnterRecompiledCode=%p iopDispatcherEvent=%p &psxRecLUT=%p &psxRegs=%p iopMem->Main=%p",
+			iopJITCompile, iopDispatcherReg, iopEnterRecompiledCode, iopDispatcherEvent,
+			(void*)&psxRecLUT, (void*)&psxRegs, (void*)iopMem->Main);
+		AMPS2Trace(b);
+	}
 	iopClearRecLUT((BASEBLOCK*)m_recBlockAlloc,
 		(((Ps2MemSize::IopRam + Ps2MemSize::Rom + Ps2MemSize::Rom1 + Ps2MemSize::Rom2) / 4)));
+	{
+		BASEBLOCK* bb = (BASEBLOCK*)m_recBlockAlloc;
+		char b[160];
+		std::snprintf(b, sizeof(b), "recResetIOP after clear bb[0]=%lx bb[1]=%lx bb[2]=%lx bb[100]=%lx",
+			(unsigned long)bb[0].m_pFnptr, (unsigned long)bb[1].m_pFnptr,
+			(unsigned long)bb[2].m_pFnptr, (unsigned long)bb[100].m_pFnptr);
+		AMPS2Trace(b);
+	}
+	AMPS2Trace("recResetIOP iopClearRecLUT done");
 
+	AMPS2Trace("recResetIOP clear psxRecLUT begin");
 	for (int i = 0; i < 0x10000; i++)
 		recLUT_SetPage(psxRecLUT, 0, 0, 0, i, 0);
+	AMPS2Trace("recResetIOP clear psxRecLUT done");
 
 	// IOP knows 64k pages, hence for the 0x10000's
 
@@ -999,6 +1063,7 @@ void recResetIOP()
 	g_psxMaxRecMem = 0;
 
 	psxbranch = 0;
+	AMPS2Trace("recResetIOP done");
 }
 
 static void recShutdown()
@@ -1725,6 +1790,19 @@ static void iopRecRecompile(const u32 startpc)
 	psxbranch = 0;
 
 	s_pCurBlock->SetFnptr((uptr)armGetCurrentCodePointer());
+	{
+		static int iop_setfn_trace = 0;
+		if (iop_setfn_trace < 8) {
+			char b[200];
+			std::snprintf(b, sizeof(b),
+				"iopRecRecompile#%d startpc=%08x recPtr=%p armCur=%p stored=%lx pcurblock=%p &fnptr=%p luteq=%p",
+				iop_setfn_trace, startpc, recPtr, armGetCurrentCodePointer(),
+				(unsigned long)s_pCurBlock->m_pFnptr, (void*)s_pCurBlock, (void*)&s_pCurBlock->m_pFnptr,
+				(void*)&psxRecLUT[(startpc & 0x1fffffff) >> 16]);
+			AMPS2Trace(b);
+			iop_setfn_trace++;
+		}
+	}
 	s_psxBlockCycles = 0;
 
 	// reset recomp state variables

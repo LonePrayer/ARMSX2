@@ -3,6 +3,9 @@
 
 #include "IopHw_Internal.h"
 #include "Sif.h"
+
+#include <atomic>
+#include <cstdio>
 #include "SIO/Sio2.h"
 #include "SIO/Sio0.h"
 #include "FW.h"

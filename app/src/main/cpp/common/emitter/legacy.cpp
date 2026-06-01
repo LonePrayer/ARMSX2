@@ -74,7 +74,7 @@ emitterT u32* J32Rel(int cc, u32 to)
 ////////////////////////////////////////////////////
 emitterT void x86SetPtr(u8* ptr)
 {
-	x86Ptr = ptr;
+	xSetPtr(ptr);
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////
@@ -92,7 +92,7 @@ void x86SetJ8(u8* j8)
 		Console.Error("j8 greater than 0x7f!!");
 		assert(0);
 	}
-	*j8 = (u8)jump;
+	*xGetWritablePtr(j8) = (u8)jump;
 }
 
 void x86SetJ8A(u8* j8)
@@ -114,22 +114,22 @@ void x86SetJ8A(u8* j8)
 		{
 			jump = newjump;
 			while ((uptr)x86Ptr & 0xf)
-				*x86Ptr++ = 0x90;
+				xWrite8(0x90);
 		}
 	}
-	*j8 = (u8)jump;
+	*xGetWritablePtr(j8) = (u8)jump;
 }
 
 ////////////////////////////////////////////////////
 emitterT void x86SetJ32(u32* j32)
 {
-	*j32 = (x86Ptr - (u8*)j32) - 4;
+	*xGetWritablePtr(j32) = (x86Ptr - (u8*)j32) - 4;
 }
 
 emitterT void x86SetJ32A(u32* j32)
 {
 	while ((uptr)x86Ptr & 0xf)
-		*x86Ptr++ = 0x90;
+		xWrite8(0x90);
 	x86SetJ32(j32);
 }
 

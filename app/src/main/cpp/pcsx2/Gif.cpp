@@ -15,6 +15,18 @@ alignas(16) gifStruct gif;
 
 static __fi void GifDMAInt(int cycles)
 {
+	static u32 s_gif_dmaint_log_count = 0;
+	const bool log_gif_dmaint =
+		(s_gif_dmaint_log_count < 128) || ((s_gif_dmaint_log_count & 0x1ff) == 0);
+	if (log_gif_dmaint)
+	{
+		Console.WriteLn("AMPS2 GifDMAInt cycles=%d qwc=%u fifo=%d path3=%d str=%u done=%d gs=%d cycle=%u interrupt=0x%08x next=%u",
+			cycles, gifch.qwc, gif_fifo.fifoSize, static_cast<int>(gifUnit.gifPath[GIF_PATH_3].state),
+			static_cast<u32>(gifch.chcr.STR), static_cast<int>(gif.gspath3done), gif.gscycles,
+			cpuRegs.cycle, cpuRegs.interrupt, cpuRegs.nextEventCycle);
+	}
+	++s_gif_dmaint_log_count;
+
 	if (dmacRegs.ctrl.MFD == MFD_GIF)
 	{
 		if (!(cpuRegs.interrupt & (1 << DMAC_MFIFO_GIF)) || cpuRegs.eCycle[DMAC_MFIFO_GIF] < (u32)cycles)
@@ -213,7 +225,20 @@ __fi void gifCheckPathStatus(bool calledFromGIF)
 
 __fi void gifInterrupt()
 {
+	static u32 s_gif_interrupt_log_count = 0;
+	const bool log_gif_interrupt =
+		(s_gif_interrupt_log_count < 128) || ((s_gif_interrupt_log_count & 0x1ff) == 0);
+	if (log_gif_interrupt)
+	{
+		Console.WriteLn("AMPS2 GIF interrupt enter qwc=%u fifo=%d fqc=%u apath=%u oph=%u path3=%d str=%u done=%d dmae=%u cycle=%u interrupt=0x%08x",
+			gifch.qwc, gif_fifo.fifoSize, gifRegs.stat.FQC, gifRegs.stat.APATH, gifRegs.stat.OPH,
+			static_cast<int>(gifUnit.gifPath[GIF_PATH_3].state), static_cast<u32>(gifch.chcr.STR), static_cast<int>(gif.gspath3done),
+			static_cast<u32>(dmacRegs.ctrl.DMAE), cpuRegs.cycle, cpuRegs.interrupt);
+	}
+	++s_gif_interrupt_log_count;
+
 	GIF_LOG("gifInterrupt caught qwc=%d fifo=%d(%d) apath=%d oph=%d state=%d!", gifch.qwc, gifRegs.stat.FQC, gif_fifo.fifoSize, gifRegs.stat.APATH, gifRegs.stat.OPH, gifUnit.gifPath[GIF_PATH_3].state);
+
 	gifCheckPathStatus(false);
 
 	if (gifUnit.gifPath[GIF_PATH_3].state == GIF_PATH_IDLE)
@@ -284,7 +309,20 @@ __fi void gifInterrupt()
 			CPU_SET_DMASTALL(DMAC_GIF, true);
 			return;
 		}
+		if (log_gif_interrupt)
+		{
+			Console.WriteLn("AMPS2 GIFdma call qwc=%u tadr=0x%08x madr=0x%08x path3=%d prev=%d gs=%d",
+				gifch.qwc, gifch.tadr, gifch.madr, static_cast<int>(gifUnit.gifPath[GIF_PATH_3].state),
+				gif.prevcycles, gif.gscycles);
+		}
 		GIFdma();
+		if (log_gif_interrupt)
+		{
+			Console.WriteLn("AMPS2 GIFdma return qwc=%u fifo=%d fqc=%u path3=%d str=%u done=%d gs=%d cycle=%u interrupt=0x%08x",
+				gifch.qwc, gif_fifo.fifoSize, gifRegs.stat.FQC, static_cast<int>(gifUnit.gifPath[GIF_PATH_3].state),
+				static_cast<u32>(gifch.chcr.STR), static_cast<int>(gif.gspath3done), gif.gscycles, cpuRegs.cycle,
+				cpuRegs.interrupt);
+		}
 
 		return;
 	}

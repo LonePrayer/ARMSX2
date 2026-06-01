@@ -12,7 +12,7 @@
 namespace a64 = vixl::aarch64;
 
 static const uint iREGCNT_XMM = 16;
-#if defined(__ANDROID__) || (defined(_M_ARM64) && defined(PCSX2_ARM64_DYNAREC))
+#if defined(__ANDROID__) || (defined(_M_ARM64) && defined(PCSX2_ARM64_DYNAREC)) || defined(PCSX2_IOS)
 static const uint iREGCNT_GPR = 25;
 #else
 static const uint iREGCNT_GPR = 16;
@@ -52,6 +52,7 @@ extern const a64::WRegister
 #else
 
 extern thread_local u8* x86Ptr;
+extern thread_local u8* x86WritePtr;
 
 namespace x86Emitter
 {
@@ -187,7 +188,14 @@ namespace x86Emitter
 	extern void xAlignCallTarget();
 
 	extern u8* xGetPtr();
+	extern void* xGetWritablePtr(void* ptr);
 	extern u8* xGetAlignedCallTarget();
+
+	template <typename T>
+	static __fi T* xGetWritablePtr(T* ptr)
+	{
+		return static_cast<T*>(xGetWritablePtr(static_cast<void*>(ptr)));
+	}
 
 	extern JccComparisonType xInvertCond(JccComparisonType src);
 

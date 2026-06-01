@@ -428,6 +428,10 @@ s32 DoCDVDreadSector(u8* buffer, u32 lsn, int mode)
 {
 	CheckNullCDVD();
 	int ret = CDVD->readSector(buffer, lsn, mode);
+	static u32 s_amethyst_read_sector_log_count = 0;
+	if (ret != 0 || s_amethyst_read_sector_log_count < 32 || ((s_amethyst_read_sector_log_count & 0x7f) == 0))
+		Console.WriteLn("AMPS2 CDVD api readSector lsn=%u mode=%d ret=%d count=%u", lsn, mode, ret, s_amethyst_read_sector_log_count);
+	++s_amethyst_read_sector_log_count;
 
 	if (ret == 0 && blockDumpFile.IsOpened())
 	{
@@ -470,13 +474,23 @@ s32 DoCDVDreadTrack(u32 lsn, int mode)
 
 	//DevCon.Warning("CDVD readTrack(lsn=%d,mode=%d)",params lsn, lastReadSize);
 	lastLSN = lsn;
-	return CDVD->readTrack(lsn, mode);
+	const s32 ret = CDVD->readTrack(lsn, mode);
+	static u32 s_amethyst_read_track_log_count = 0;
+	if (ret != 0 || s_amethyst_read_track_log_count < 64 || ((s_amethyst_read_track_log_count & 0x7f) == 0))
+		Console.WriteLn("AMPS2 CDVD api readTrack lsn=%u mode=%d lastReadSize=%u ret=%d count=%u",
+			lsn, mode, lastReadSize, ret, s_amethyst_read_track_log_count);
+	++s_amethyst_read_track_log_count;
+	return ret;
 }
 
 s32 DoCDVDgetBuffer(u8* buffer)
 {
 	CheckNullCDVD();
 	const int ret = CDVD->getBuffer(buffer);
+	static u32 s_amethyst_get_buffer_log_count = 0;
+	if (ret != 0 || s_amethyst_get_buffer_log_count < 64 || ((s_amethyst_get_buffer_log_count & 0x7f) == 0))
+		Console.WriteLn("AMPS2 CDVD api getBuffer ret=%d lsn=%u count=%u", ret, lastLSN, s_amethyst_get_buffer_log_count);
+	++s_amethyst_get_buffer_log_count;
 
 	if (ret == 0 && blockDumpFile.IsOpened())
 	{

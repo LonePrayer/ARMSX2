@@ -756,6 +756,7 @@ void* mVUcompile(microVU& mVU, u32 startPC, uptr pState)
         armSetAsmPtr(mVU.prog.x86ptr, mVU.prog.x86end - mVU.prog.x86ptr, nullptr);
         thisPtr = armStartBlock();
     }
+    armAsm->bti(a64::EmitBTI_jc);
 
 	const u32 endCount = (((microRegInfo*)pState)->blockType) ? 1 : (mVU.microMemSize >> 3); // mVU.microMemSize / 8
 

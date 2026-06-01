@@ -48,5 +48,10 @@ void spu2Irq()
 void iopIntcIrq(uint irqType)
 {
 	psxHu32(0x1070) |= 1 << irqType;
+	// AMPS2 diagnostic: count IRQ deliveries per type.
+	extern uint64_t g_amps2_iop_intc_count[32];
+	if (irqType < 32) g_amps2_iop_intc_count[irqType]++;
 	iopTestIntc();
 }
+
+uint64_t g_amps2_iop_intc_count[32] = {0};

@@ -8,6 +8,11 @@
 
 #include "common/Perf.h"
 
+#if defined(PCSX2_IOS)
+extern "C" void* AMIOSGetJITWriteAlias(void* address);
+extern "C" void AMIOSPrepareJITRegion(void* address, size_t size);
+#endif
+
 using namespace vtlb_private;
 #if !defined(__ANDROID__) && !defined(PCSX2_IOS)
 using namespace x86Emitter;
@@ -261,10 +266,19 @@ namespace vtlb_private
 	}
 } // namespace vtlb_private
 
+#if !defined(PCSX2_IOS)
 static bool hasBeenCalled = false;
+#endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+static constexpr u32 INDIRECT_DISPATCHER_SIZE = 128;
+#else
 static constexpr u32 INDIRECT_DISPATCHER_SIZE = 64;
+#endif
 static constexpr u32 INDIRECT_DISPATCHERS_SIZE = 2 * 5 * 2 * INDIRECT_DISPATCHER_SIZE;
 alignas(__pagesize) static u8 m_IndirectDispatchers[__pagesize];
+// After dispatchers are copied into JIT-blessed RX memory, this points at the RX base;
+// EE recompiler armEmitCall must target the RX copy, not the (non-exec) bss buffer.
+static u8* s_IndirectDispatchers_RX = nullptr;
 
 // ------------------------------------------------------------------------
 // mode        - 0 for read, 1 for write!
@@ -274,7 +288,8 @@ static u8* GetIndirectDispatcherPtr(int mode, int operandsize, int sign = 0)
 {
 	pxAssert(mode || operandsize >= 3 ? !sign : true);
 
-	return &m_IndirectDispatchers[(mode * (8 * INDIRECT_DISPATCHER_SIZE)) + (sign * 5 * INDIRECT_DISPATCHER_SIZE) +
+	u8* base = s_IndirectDispatchers_RX ? s_IndirectDispatchers_RX : m_IndirectDispatchers;
+	return &base[(mode * (8 * INDIRECT_DISPATCHER_SIZE)) + (sign * 5 * INDIRECT_DISPATCHER_SIZE) +
 								  (operandsize * INDIRECT_DISPATCHER_SIZE)];
 }
 
@@ -395,6 +410,43 @@ void vtlb_DynGenDispatchers()
 {
     u8* code_start = armEndBlock();
     ////
+#if defined(PCSX2_IOS)
+    // iOS 26 TXM JIT only permits executable code in the SideStore-prepared JIT
+    // mapping. Generate the indirect dispatchers directly into the EE rec cache;
+    // using a static bss scratch page here can crash when the JIT bridge tries to
+    // bless or execute-protect a non-JIT address.
+	    u8* dispatcher_base = reinterpret_cast<u8*>(
+	        (reinterpret_cast<uintptr_t>(code_start) + 15u) & ~static_cast<uintptr_t>(15u));
+	    s_IndirectDispatchers_RX = dispatcher_base;
+
+	    std::fprintf(stderr, "AMPS2 vtlb_DynGenDispatchers iOS direct begin code=%p aligned=%p size=%u\n",
+	        code_start, dispatcher_base, INDIRECT_DISPATCHERS_SIZE);
+	    for (int mode = 0; mode < 2; ++mode) {
+	        for (int bits = 0; bits < 5; ++bits) {
+	            for (int sign = 0; sign < (!mode && bits < 3 ? 2 : 1); ++sign) {
+	                u8* dispatcher = GetIndirectDispatcherPtr(mode, bits, !!sign);
+	                armSetAsmPtr(dispatcher, (dispatcher_base + INDIRECT_DISPATCHERS_SIZE) - dispatcher, nullptr);
+	                armStartBlock();
+	                DynGen_IndirectTlbDispatcher(mode, bits, !!sign);
+	                u8* dispatcher_end = armEndBlock();
+	                const ptrdiff_t used = dispatcher_end - dispatcher;
+                if (used > INDIRECT_DISPATCHER_SIZE) {
+                    std::fprintf(stderr,
+                        "AMPS2 vtlb dispatcher overflow mode=%d bits=%d sign=%d used=%td slot=%u\n",
+                        mode, bits, sign, used, INDIRECT_DISPATCHER_SIZE);
+                }
+            }
+        }
+    }
+
+	    Perf::any.Register(s_IndirectDispatchers_RX, INDIRECT_DISPATCHERS_SIZE, "TLB Dispatcher");
+	    std::fprintf(stderr, "AMPS2 vtlb_DynGenDispatchers iOS direct done code=%p next=%p\n",
+	        dispatcher_base, dispatcher_base + INDIRECT_DISPATCHERS_SIZE);
+
+	    armSetAsmPtr(dispatcher_base + INDIRECT_DISPATCHERS_SIZE, INDIRECT_DISPATCHERS_SIZE, nullptr);
+	    armStartBlock();
+	    return;
+#else
     if (!hasBeenCalled)
     {
         hasBeenCalled = true;
@@ -421,10 +473,22 @@ void vtlb_DynGenDispatchers()
 
     Perf::any.Register(m_IndirectDispatchers, __pagesize, "TLB Dispatcher");
     //// copy code
+#if defined(PCSX2_IOS)
+    // Pre-bless target pages before writing code through the RW alias.
+    // The bless writes 0x69 at byte 0 of each page — must happen on empty pages.
+    AMIOSPrepareJITRegion(code_start, INDIRECT_DISPATCHERS_SIZE);
+    memcpy(AMIOSGetJITWriteAlias(code_start), m_IndirectDispatchers, INDIRECT_DISPATCHERS_SIZE);
+    HostSys::FlushInstructionCache(code_start, INDIRECT_DISPATCHERS_SIZE);
+#else
     memcpy(code_start, m_IndirectDispatchers, INDIRECT_DISPATCHERS_SIZE);
+#endif
+    // Now that the RX copy exists, redirect all GetIndirectDispatcherPtr() callers
+    // (notably DynGen_HandlerTest's armEmitCall in EE recompiler blocks) to the RX base.
+    s_IndirectDispatchers_RX = code_start;
     ////
     armSetAsmPtr(code_start + INDIRECT_DISPATCHERS_SIZE, INDIRECT_DISPATCHERS_SIZE, nullptr);
     armStartBlock();
+#endif
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////

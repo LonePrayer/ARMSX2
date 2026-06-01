@@ -108,6 +108,8 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 	GSVSyncMode vsync_mode, bool allow_present_throttle)
 {
 	const RenderAPI new_api = GetAPIForRenderer(renderer);
+	Host::ReportInfoAsync("AmethystGS", fmt::format("OpenGSDevice begin renderer={} api={}",
+		Pcsx2Config::GSOptions::GetRendererName(renderer), GSDevice::RenderAPIToString(new_api)));
 	switch (new_api)
 	{
 #ifdef _WIN32
@@ -140,10 +142,14 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 			return false;
 	}
 
+	Host::ReportInfoAsync("AmethystGS", "GSDevice::Create begin");
 	bool okay = g_gs_device->Create(vsync_mode, allow_present_throttle);
+	Host::ReportInfoAsync("AmethystGS", fmt::format("GSDevice::Create done result={}", okay));
 	if (okay)
 	{
+		Host::ReportInfoAsync("AmethystGS", "ImGuiManager::Initialize begin");
 		okay = ImGuiManager::Initialize();
+		Host::ReportInfoAsync("AmethystGS", fmt::format("ImGuiManager::Initialize done result={}", okay));
 		if (!okay)
 			Console.Error("Failed to initialize ImGuiManager");
 	}
@@ -162,6 +168,7 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 	}
 
 	GSConfig.OsdShowGPU = GSConfig.OsdShowGPU && g_gs_device->SetGPUTimingEnabled(true);
+	Host::ReportInfoAsync("AmethystGS", "OpenGSDevice done");
 
 	Console.WriteLn(Color_StrongGreen, "%s Graphics Driver Info:", GSDevice::RenderAPIToString(new_api));
 	Console.WriteLn(g_gs_device->GetDriverInfo());
@@ -199,29 +206,43 @@ static void GSClampUpscaleMultiplier(Pcsx2Config::GSOptions& config)
 
 static bool OpenGSRenderer(GSRendererType renderer, u8* basemem)
 {
+	Host::ReportInfoAsync("AmethystGS", fmt::format("OpenGSRenderer begin renderer={}",
+		Pcsx2Config::GSOptions::GetRendererName(renderer)));
 	// Must be done first, initialization routines in GSState use GSIsHardwareRenderer().
 	GSCurrentRenderer = renderer;
 
+	Host::ReportInfoAsync("AmethystGS", "GSVertexSW::InitStatic begin");
 	GSVertexSW::InitStatic();
+	Host::ReportInfoAsync("AmethystGS", "GSVertexSW::InitStatic done");
 
 	if (renderer == GSRendererType::Null)
 	{
+		Host::ReportInfoAsync("AmethystGS", "Create GSRendererNull");
 		g_gs_renderer = std::make_unique<GSRendererNull>();
 	}
 	else if (renderer != GSRendererType::SW)
 	{
+		Host::ReportInfoAsync("AmethystGS", "GSClampUpscaleMultiplier begin");
 		GSClampUpscaleMultiplier(GSConfig);
+		Host::ReportInfoAsync("AmethystGS", "Create GSRendererHW begin");
 		g_gs_renderer = std::make_unique<GSRendererHW>();
+		Host::ReportInfoAsync("AmethystGS", "Create GSRendererHW done");
 	}
 	else
 	{
+		Host::ReportInfoAsync("AmethystGS", "Create GSRendererSW begin");
 		g_gs_renderer = std::unique_ptr<GSRenderer>(MULTI_ISA_SELECT(makeGSRendererSW)(GSConfig.SWExtraThreads));
+		Host::ReportInfoAsync("AmethystGS", "Create GSRendererSW done");
 	}
 
+	Host::ReportInfoAsync("AmethystGS", "SetRegsMem begin");
 	g_gs_renderer->SetRegsMem(basemem);
+	Host::ReportInfoAsync("AmethystGS", "ResetPCRTC begin");
 	g_gs_renderer->ResetPCRTC();
+	Host::ReportInfoAsync("AmethystGS", "UpdateRenderFixes begin");
 	g_gs_renderer->UpdateRenderFixes();
 	g_perfmon.Reset();
+	Host::ReportInfoAsync("AmethystGS", "OpenGSRenderer done");
 	return true;
 }
 
@@ -504,7 +525,15 @@ void GSEndCapture()
 
 void GSPresentCurrentFrame()
 {
-	g_gs_renderer->PresentCurrentFrame();
+	static int s_amethyst_present_current_logs = 0;
+	if (s_amethyst_present_current_logs < 8)
+	{
+		Host::ReportInfoAsync("AmethystGS",
+			fmt::format("GSPresentCurrentFrame renderer={} device={}", g_gs_renderer ? "yes" : "no", g_gs_device ? "yes" : "no"));
+		s_amethyst_present_current_logs++;
+	}
+	if (g_gs_renderer)
+		g_gs_renderer->PresentCurrentFrame();
 }
 
 void GSThrottlePresentation()
@@ -962,8 +991,21 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 	}
 	else
 	{
-		fprintf(stderr, "Failed to open %s due to %s\n", file_name, strerror(errno));
-		return nullptr;
+		const int shm_errno = errno;
+#ifdef __APPLE__
+		const char* tmpdir = std::getenv("TMPDIR");
+		std::string path = fmt::format("{}/pcsx2-gs-XXXXXX", (tmpdir && tmpdir[0] != '\0') ? tmpdir : "/tmp");
+		s_shm_fd = mkstemp(path.data());
+		if (s_shm_fd >= 0)
+		{
+			unlink(path.c_str());
+		}
+		else
+#endif
+		{
+			fprintf(stderr, "Failed to open %s due to %s\n", file_name, strerror(shm_errno));
+			return nullptr;
+		}
 	}
 
 	if (ftruncate(s_shm_fd, repeat * size) < 0)

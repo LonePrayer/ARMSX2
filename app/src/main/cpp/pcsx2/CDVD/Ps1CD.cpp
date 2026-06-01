@@ -1076,15 +1076,22 @@ void psxDma3(u32 madr, u32 bcr, u32 chcr)
 
 			break;
 		case 0x41000200:
+		{
 			if (HW_DMA3_BCR_H16 == 0)
 				break;
 
-			if (cdvd.WaitingDMA)
+			const bool cdvd_read_pending = (psxRegs.interrupt & (1 << IopEvt_CdvdRead)) != 0;
+			if (cdvd.WaitingDMA || (cdvd.Reading && !cdvd_read_pending))
 			{
+				Console.WriteLn("AMPS2 CDVD dma3 kick-read waiting=%d reading=%d pending=%d seekCompleted=%d current=%u seek=%u left=%d buffered=%u readTime=%u dma3[madr=0x%08x bcr=0x%08x chcr=0x%08x]",
+					cdvd.WaitingDMA, cdvd.Reading, cdvd_read_pending, cdvd.SeekCompleted,
+					cdvd.CurrentSector, cdvd.SeekToSector, cdvd.SectorCnt, cdvd.nextSectorsBuffered,
+					cdvd.ReadTime, HW_DMA3_MADR, HW_DMA3_BCR, HW_DMA3_CHCR);
 				PSX_INT(IopEvt_CdvdRead, (cdvd.BlockSize / 4) * 12); //Data should be already buffered so simulate DMA time
 			}
 			//SysPrintf("unhandled cdrom dma3: madr: %x, bcr: %x, chcr %x\n", madr, bcr, chcr);
 			return;
+		}
 
 		default:
 			CDVD_LOG("Unknown cddma %lx", chcr);

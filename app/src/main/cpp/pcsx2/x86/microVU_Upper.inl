@@ -534,26 +534,17 @@ static void mVU_FTOIx(mP, const a64::MemOperand& addr, microOpcode opEnum)
 		if (!_Ft_)
 			return;
 		const xmm& Fs = mVU.regAlloc->allocReg(_Fs_, _Ft_, _X_Y_Z_W, !((_Fs_ == _Ft_) && (_X_Y_Z_W == 0xf)));
-		const xmm& t1 = mVU.regAlloc->allocReg();
-
-		// cvttps2dq returns 0x8000000 for any unrepresentable values.
-		// We want it to return 0x8000000 for negative and 0x7fffffff for positive.
-		// So for unrepresentable positive values, xor with 0xffffffff to turn 0x80000000 into 0x7fffffff.
+		// AArch64 FCVTZS already saturates positive overflow to INT_MAX and
+		// negative overflow to INT_MIN. The x86 CVTTPS2DQ xor fix would flip
+		// positive overflow back to INT_MIN here and corrupt VU1 vertex data.
 		if (addr.IsValid()) {
 //            xMUL.PS(Fs, ptr128[addr]);
             armAsm->Fmul(Fs.V4S(), Fs.V4S(), armLoadPtrV(addr).V4S());
         }
-//		xMOVAPS(t1, Fs);
-        armAsm->Mov(t1.Q(), Fs.Q());
-//		xPCMP.GTD(t1, ptr128[mVUglob.I32MAXF]);
-        armAsm->Cmgt(t1.V4S(), t1.V4S(), armLoadPtrV(PTR_CPU(mVUglob.I32MAXF)).V4S());
 //		xCVTTPS2DQ(Fs, Fs);
         armAsm->Fcvtzs(Fs.V4S(), Fs.V4S());
-//		xPXOR(Fs, t1);
-        armAsm->Eor(Fs.V16B(), Fs.V16B(), t1.V16B());
 
 		mVU.regAlloc->clearNeeded(Fs);
-		mVU.regAlloc->clearNeeded(t1);
 		mVU.profiler.EmitOp(opEnum);
 	}
 	pass3

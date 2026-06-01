@@ -11,6 +11,8 @@
 #include "VMManager.h"
 
 #include <ctype.h>
+#include <cstdio>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -94,6 +96,16 @@ void Hle_ClearHostRoot()
 
 namespace R3000A
 {
+
+static bool AmethystIopDiagEnabled()
+{
+	static const bool enabled = []() {
+		const char* value = std::getenv("AM_PS2_STATE_DIAG");
+		return value && value[0] != '\0' && std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+			std::strcmp(value, "FALSE") != 0;
+	}();
+	return enabled;
+}
 
 #define v0 (psxRegs.GPR.n.v0)
 #define a0 (psxRegs.GPR.n.a0)
@@ -1226,6 +1238,9 @@ namespace R3000A
 			LoadFuncs(a0);
 
 			const std::string modname = iopMemReadString(a0 + 12);
+			if (AmethystIopDiagEnabled())
+				std::fprintf(stderr, "AMPS2 IOP RegLib: %-8s v=%x.%02x a0=%08x\n",
+					modname.c_str(), iopMemRead8(a0 + 9), iopMemRead8(a0 + 8), a0);
 			if (modname == "thbase")
 			{
 				const u32 version = iopMemRead32(a0 + 8);

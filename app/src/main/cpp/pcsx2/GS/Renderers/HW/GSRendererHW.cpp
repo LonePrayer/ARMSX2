@@ -12,23 +12,38 @@
 #include "common/StringUtil.h"
 #include <bit>
 
+static int s_amethyst_hw_output_logs = 0;
+static int s_amethyst_hw_target_logs = 0;
+
 GSRendererHW::GSRendererHW()
 	: GSRenderer()
 {
+	Host::ReportInfoAsync("AmethystGS", "GSRendererHW ctor populate begin");
 	MULTI_ISA_SELECT(GSRendererHWPopulateFunctions)(*this);
+	Host::ReportInfoAsync("AmethystGS", "GSRendererHW ctor populate done");
 	m_mipmap = GSConfig.HWMipmap;
+	Host::ReportInfoAsync("AmethystGS", "GSRendererHW ctor SetTCOffset begin");
 	SetTCOffset();
+	Host::ReportInfoAsync("AmethystGS", "GSRendererHW ctor SetTCOffset done");
 
 	pxAssert(!g_texture_cache);
+	Host::ReportInfoAsync("AmethystGS", "GSRendererHW ctor GSTextureCache begin");
 	g_texture_cache = std::make_unique<GSTextureCache>();
+	Host::ReportInfoAsync("AmethystGS", "GSRendererHW ctor GSTextureCache done");
+	Host::ReportInfoAsync("AmethystGS", "GSRendererHW ctor TextureReplacements begin");
 	GSTextureReplacements::Initialize();
+	Host::ReportInfoAsync("AmethystGS", "GSRendererHW ctor TextureReplacements done");
 
 	// Hope nothing requires too many draw calls.
+	Host::ReportInfoAsync("AmethystGS", "GSRendererHW ctor drawlist reserve begin");
 	m_drawlist.reserve(2048);
+	Host::ReportInfoAsync("AmethystGS", "GSRendererHW ctor drawlist reserve done");
 
 	memset(&m_conf, 0, sizeof(m_conf));
 
+	Host::ReportInfoAsync("AmethystGS", "GSRendererHW ctor ResetStates begin");
 	ResetStates();
+	Host::ReportInfoAsync("AmethystGS", "GSRendererHW ctor ResetStates done");
 }
 
 void GSRendererHW::SetTCOffset()
@@ -182,6 +197,15 @@ GSTexture* GSRendererHW::GetOutput(int i, float& scale, int& y_offset)
 		{
 			t->Save(GetDrawDumpPath("%05d_f%05lld_fr%d_%05x_%s.bmp", s_n, g_perfmon.GetFrame(), i, static_cast<int>(TEX0.TBP0), psm_str(TEX0.PSM)));
 		}
+	}
+	else if (s_amethyst_hw_output_logs < 96 || ((g_perfmon.GetFrame() % 120) == 0))
+	{
+		Console.WriteLn("AMPS2 HW GetOutput miss frame=%llu display=%d index=%d bp=0x%05x fbw=%u psm=%s fbSize=%dx%d fbRect=%d,%d-%d,%d scale=%.2f",
+			static_cast<unsigned long long>(g_perfmon.GetFrame()), i, index, static_cast<unsigned>(TEX0.TBP0),
+			static_cast<unsigned>(TEX0.TBW), psm_str(TEX0.PSM), framebufferSize.x, framebufferSize.y,
+			curFramebuffer.framebufferRect.x, curFramebuffer.framebufferRect.y,
+			curFramebuffer.framebufferRect.z, curFramebuffer.framebufferRect.w, GetTextureScaleFactor());
+		s_amethyst_hw_output_logs++;
 	}
 
 	return t;
@@ -3369,6 +3393,16 @@ void GSRendererHW::Draw()
 		rt = g_texture_cache->LookupTarget(FRAME_TEX0, t_size, ((src && src->m_scale != 1) && GSConfig.UserHacks_NativeScaling == GSNativeScaling::Normal && !possible_shuffle) ? GetTextureScaleFactor() : target_scale, GSTextureCache::RenderTarget, true,
 			fm, false, force_preload, preserve_rt_rgb, preserve_rt_alpha, lookup_rect, possible_shuffle, is_possible_mem_clear && FRAME_TEX0.TBP0 != m_cached_ctx.ZBUF.Block(),
 			GSConfig.UserHacks_NativeScaling != GSNativeScaling::Off && preserve_downscale_draw && is_possible_mem_clear != ClearType::NormalClear, src, ds, (no_ds || !ds) ? -1 : (m_cached_ctx.ZBUF.Block() - ds->m_TEX0.TBP0));
+
+		if (s_amethyst_hw_target_logs < 128 && (FRAME_TEX0.TBP0 == 0x1400 || FRAME_TEX0.TBP0 == 0x1446 || s_amethyst_hw_target_logs < 48))
+		{
+			Console.WriteLn("AMPS2 HW target lookup frame=%llu draw=%u bp=0x%05x fbw=%u psm=%s size=%dx%d rect=%d,%d-%d,%d hit=%d noRT=%d noDS=%d src=%d possibleShuffle=%d clear=%d",
+				static_cast<unsigned long long>(g_perfmon.GetFrame()), s_n, static_cast<unsigned>(FRAME_TEX0.TBP0),
+				static_cast<unsigned>(FRAME_TEX0.TBW), psm_str(FRAME_TEX0.PSM), t_size.x, t_size.y,
+				m_r.x, m_r.y, m_r.z, m_r.w, rt ? 1 : 0, no_rt ? 1 : 0, no_ds ? 1 : 0,
+				src ? 1 : 0, possible_shuffle ? 1 : 0, is_clear ? 1 : 0);
+			s_amethyst_hw_target_logs++;
+		}
 
 		// Draw skipped because it was a clear and there was no target.
 		if (!rt)

@@ -37,6 +37,19 @@ cdvdStruct cdvd;
 
 s64 PSXCLK = 36864000;
 
+static bool AmethystCDVDLogSample(u32& counter)
+{
+	return (counter++ < 64) || ((counter & 0x3f) == 0);
+}
+
+static bool AmethystCDVDLogTargeted()
+{
+	const u32 delta = (cdvd.CurrentSector > cdvd.SeekToSector) ?
+		(cdvd.CurrentSector - cdvd.SeekToSector) :
+		(cdvd.SeekToSector - cdvd.CurrentSector);
+	return cdvd.SeekToSector <= 32 || delta > 1024 || (HW_DMA3_CHCR & 0x01000000) != 0;
+}
+
 static constexpr u8 monthmap[13] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
 
 static constexpr u8 cdvdParamLength[16] = { 0, 0, 0, 0, 0, 4, 11, 11, 11, 1, 255, 255, 7, 2, 11, 1 };
@@ -1237,6 +1250,15 @@ __fi void cdvdSectorReady()
 __fi void cdvdReadInterrupt()
 {
 	//Console.WriteLn("cdvdReadInterrupt %x %x %x %x %x", cpuRegs.interrupt, cdvd.Readed, cdvd.Reading, cdvd.nSectors, (HW_DMA3_BCR_H16 * HW_DMA3_BCR_L16) *4);
+	static u32 s_amethyst_read_interrupt_log_count = 0;
+	if (AmethystCDVDLogSample(s_amethyst_read_interrupt_log_count) || AmethystCDVDLogTargeted())
+	{
+		Console.WriteLn("AMPS2 CDVD read-int enter sector=%u seek=%u left=%d buffered=%u readErr=%d reading=%d waitingDma=%d seekCompleted=%d readTime=%u ready=0x%02x status=0x%02x intr=0x%02x psxInt=0x%08x readRemain=%d readyRemain=%d dma3[chcr=0x%08x madr=0x%08x bcr=0x%08x]",
+			cdvd.CurrentSector, cdvd.SeekToSector, cdvd.SectorCnt, cdvd.nextSectorsBuffered, cdvd.ReadErr,
+			cdvd.Reading, cdvd.WaitingDMA, cdvd.SeekCompleted, cdvd.ReadTime, cdvd.Ready, cdvd.Status, cdvd.IntrStat,
+			psxRegs.interrupt, psxRemainingCycles(IopEvt_CdvdRead), psxRemainingCycles(IopEvt_CdvdSectorReady),
+			HW_DMA3_CHCR, HW_DMA3_MADR, HW_DMA3_BCR);
+	}
 
 	cdvdUpdateReady(CDVD_DRIVE_BUSY);
 	cdvdUpdateStatus(CDVD_STATUS_READ);
@@ -1277,6 +1299,7 @@ __fi void cdvdReadInterrupt()
 
 	if (cdvd.CurrentSector >= cdvd.MaxSector)
 	{
+		Console.WriteLn("AMPS2 CDVD read-int past-end sector=%u max=%u left=%d", cdvd.CurrentSector, cdvd.MaxSector, cdvd.SectorCnt);
 		DevCon.Warning("Read past end of disc Sector %d Max Sector %d", cdvd.CurrentSector, cdvd.MaxSector);
 		cdvd.Error = 0x32; // Outermost track reached during playback
 		cdvdUpdateReady(CDVD_DRIVE_READY | CDVD_DRIVE_ERROR);
@@ -1301,6 +1324,7 @@ __fi void cdvdReadInterrupt()
 		if (cdvd.ReadErr == -1)
 		{
 			cdvd.CurrentRetryCnt++;
+			Console.WriteLn("AMPS2 CDVD read-int error sector=%u attempt=%d max=%d mode=%d", cdvd.CurrentSector, cdvd.CurrentRetryCnt, cdvd.RetryCntMax, cdvd.ReadMode);
 
 			if (cdvd.CurrentRetryCnt <= cdvd.RetryCntMax)
 			{
@@ -1324,6 +1348,8 @@ __fi void cdvdReadInterrupt()
 	{
 		if (cdvdReadSector() == -1)
 		{
+			Console.WriteLn("AMPS2 CDVD read-int waiting-dma sector=%u blockSize=%d dma3[chcr=0x%08x madr=0x%08x bcr=0x%08x]",
+				cdvd.CurrentSector, cdvd.BlockSize, HW_DMA3_CHCR, HW_DMA3_MADR, HW_DMA3_BCR);
 			// This means that the BCR/DMA hasn't finished yet, and rather than fire off the
 			// sector-finished notice too early (which might overwrite game data) we delay a
 			// bit and try to read the sector again later.
@@ -1393,16 +1419,33 @@ __fi void cdvdReadInterrupt()
 		CDVDREAD_INT((cdvd.BlockSize / 4) * 12);
 	else
 		CDVDREAD_INT(psxRemainingCycles(IopEvt_CdvdSectorReady) + ((cdvd.BlockSize / 4) * 12));
+
+	if (AmethystCDVDLogSample(s_amethyst_read_interrupt_log_count) || AmethystCDVDLogTargeted())
+	{
+		Console.WriteLn("AMPS2 CDVD read-int exit sector=%u seek=%u left=%d buffered=%u readErr=%d reading=%d waitingDma=%d seekCompleted=%d psxInt=0x%08x readRemain=%d readyRemain=%d",
+			cdvd.CurrentSector, cdvd.SeekToSector, cdvd.SectorCnt, cdvd.nextSectorsBuffered,
+			cdvd.ReadErr, cdvd.Reading, cdvd.WaitingDMA, cdvd.SeekCompleted,
+			psxRegs.interrupt, psxRemainingCycles(IopEvt_CdvdRead), psxRemainingCycles(IopEvt_CdvdSectorReady));
+	}
 }
 
 // Returns the number of IOP cycles until the event completes.
 static uint cdvdStartSeek(uint newsector, CDVD_MODE_TYPE mode, bool transition_to_CLV)
 {
+	const u32 old_sector = cdvd.CurrentSector;
 	cdvd.SeekToSector = newsector;
 
 	uint delta = abs(static_cast<s32>(cdvd.SeekToSector - cdvd.CurrentSector));
 	uint seektime = 0;
 	bool isSeeking = false;
+	if (AmethystCDVDLogTargeted())
+	{
+		Console.WriteLn("AMPS2 CDVD start-seek enter current=%u seek=%u delta=%u mode=%d transition=%d sectorCnt=%d buffered=%u reading=%d seekCompleted=%d psxInt=0x%08x readRemain=%d readyRemain=%d dma3[chcr=0x%08x bcr=0x%08x]",
+			old_sector, cdvd.SeekToSector, delta, mode, transition_to_CLV, cdvd.SectorCnt,
+			cdvd.nextSectorsBuffered, cdvd.Reading, cdvd.SeekCompleted, psxRegs.interrupt,
+			psxRemainingCycles(IopEvt_CdvdRead), psxRemainingCycles(IopEvt_CdvdSectorReady),
+			HW_DMA3_CHCR, HW_DMA3_BCR);
+	}
 
 	cdvdUpdateReady(CDVD_DRIVE_BUSY);
 	cdvd.Reading = 1;
@@ -1491,7 +1534,16 @@ static uint cdvdStartSeek(uint newsector, CDVD_MODE_TYPE mode, bool transition_t
 					}
 				}
 				else
+				{
+					if (AmethystCDVDLogTargeted())
+					{
+						Console.WriteLn("AMPS2 CDVD start-seek buffered-return current=%u seek=%u delta=%u buffered=%u readTime=%u psxInt=0x%08x readRemain=%d readyRemain=%d",
+							cdvd.CurrentSector, cdvd.SeekToSector, delta, cdvd.nextSectorsBuffered,
+							cdvd.ReadTime, psxRegs.interrupt, psxRemainingCycles(IopEvt_CdvdRead),
+							psxRemainingCycles(IopEvt_CdvdSectorReady));
+					}
 					return (cdvd.BlockSize / 4) * 12;
+				}
 			}
 			else
 			{
@@ -1538,6 +1590,13 @@ static uint cdvdStartSeek(uint newsector, CDVD_MODE_TYPE mode, bool transition_t
 		CDVDSECTORREADY_INT(seektime);
 	}
 
+	if (AmethystCDVDLogTargeted())
+	{
+		Console.WriteLn("AMPS2 CDVD start-seek exit current=%u seek=%u delta=%u seektime=%u isSeeking=%d sectorCnt=%d buffered=%u reading=%d seekCompleted=%d psxInt=0x%08x readRemain=%d readyRemain=%d",
+			cdvd.CurrentSector, cdvd.SeekToSector, delta, seektime, isSeeking, cdvd.SectorCnt,
+			cdvd.nextSectorsBuffered, cdvd.Reading, cdvd.SeekCompleted, psxRegs.interrupt,
+			psxRemainingCycles(IopEvt_CdvdRead), psxRemainingCycles(IopEvt_CdvdSectorReady));
+	}
 	return seektime;
 }
 
@@ -2041,6 +2100,16 @@ static void cdvdWrite04(u8 rt)
 
 			CDVD_LOG("CDRead > startSector=%d, seekTo=%d nSectors=%d, RetryCnt=%x, Speed=%dx(%s), ReadMode=%x(%x) SpindleCtrl=%x",
 				cdvd.CurrentSector, cdvd.SeekToSector, cdvd.SectorCnt, cdvd.RetryCntMax, cdvd.Speed, (cdvd.SpindlCtrl & CDVD_SPINDLE_CAV) ? "CAV" : "CLV", cdvd.ReadMode, cdvd.NCMDParamBuff[10], cdvd.SpindlCtrl);
+			static u32 s_amethyst_cdread_cmd_log_count = 0;
+			const bool log_cdread_cmd = AmethystCDVDLogSample(s_amethyst_cdread_cmd_log_count) || AmethystCDVDLogTargeted();
+			if (log_cdread_cmd)
+			{
+				Console.WriteLn("AMPS2 CDVD cmd CDRead current=%u seek=%u count=%d retry=%d speed=%d mode=%d block=%d buffered=%u reading=%d seekCompleted=%d psxInt=0x%08x readRemain=%d readyRemain=%d",
+					cdvd.CurrentSector, cdvd.SeekToSector, cdvd.SectorCnt, cdvd.RetryCntMax,
+					cdvd.Speed, cdvd.ReadMode, cdvd.BlockSize, cdvd.nextSectorsBuffered,
+					cdvd.Reading, cdvd.SeekCompleted, psxRegs.interrupt,
+					psxRemainingCycles(IopEvt_CdvdRead), psxRemainingCycles(IopEvt_CdvdSectorReady));
+			}
 
 			if (EmuConfig.CdvdVerboseReads)
 				Console.WriteLn(Color_Gray, "CDRead: Reading Sector %07d (%03d Blocks of Size %d) at Speed=%dx(%s) Spindle=%x",
@@ -2052,6 +2121,8 @@ static void cdvdWrite04(u8 rt)
 			// This helps improve performance on actual from-cd emulation
 			// (ie, not using the hard drive)
 			cdvd.ReadErr = DoCDVDreadTrack(cdvd.SeekToSector, cdvd.ReadMode);
+			if (log_cdread_cmd || cdvd.ReadErr != 0)
+				Console.WriteLn("AMPS2 CDVD cmd CDRead readTrack ret=%d sector=%u mode=%d", cdvd.ReadErr, cdvd.SeekToSector, cdvd.ReadMode);
 
 			// Set the reading block flag.  If a seek is pending then Readed will
 			// take priority in the handler anyway.  If the read is contiguous then
@@ -2234,6 +2305,16 @@ static void cdvdWrite04(u8 rt)
 
 			CDVD_LOG("DvdRead > startSector=%d, seekTo=%d nSectors=%d, RetryCnt=%x, Speed=%dx(%s), ReadMode=%x(%x) SpindleCtrl=%x",
 				cdvd.CurrentSector, cdvd.SeekToSector, cdvd.SectorCnt, cdvd.RetryCntMax, cdvd.Speed, (cdvd.SpindlCtrl & CDVD_SPINDLE_CAV) ? "CAV" : "CLV", cdvd.ReadMode, cdvd.NCMDParamBuff[10], cdvd.SpindlCtrl);
+			static u32 s_amethyst_dvdread_cmd_log_count = 0;
+			const bool log_dvdread_cmd = AmethystCDVDLogSample(s_amethyst_dvdread_cmd_log_count) || AmethystCDVDLogTargeted();
+			if (log_dvdread_cmd)
+			{
+				Console.WriteLn("AMPS2 CDVD cmd DvdRead current=%u seek=%u count=%d retry=%d speed=%d mode=%d block=%d buffered=%u reading=%d seekCompleted=%d psxInt=0x%08x readRemain=%d readyRemain=%d",
+					cdvd.CurrentSector, cdvd.SeekToSector, cdvd.SectorCnt, cdvd.RetryCntMax,
+					cdvd.Speed, cdvd.ReadMode, cdvd.BlockSize, cdvd.nextSectorsBuffered,
+					cdvd.Reading, cdvd.SeekCompleted, psxRegs.interrupt,
+					psxRemainingCycles(IopEvt_CdvdRead), psxRemainingCycles(IopEvt_CdvdSectorReady));
+			}
 
 			if (EmuConfig.CdvdVerboseReads)
 				Console.WriteLn(Color_Gray, "DvdRead: Reading Sector %07d (%03d Blocks of Size %d) at Speed=%dx(%s) SpindleCtrl=%x",
@@ -2245,6 +2326,8 @@ static void cdvdWrite04(u8 rt)
 			// This helps improve performance on actual from-cd emulation
 			// (ie, not using the hard drive)
 			cdvd.ReadErr = DoCDVDreadTrack(cdvd.SeekToSector, cdvd.ReadMode);
+			if (log_dvdread_cmd || cdvd.ReadErr != 0)
+				Console.WriteLn("AMPS2 CDVD cmd DvdRead readTrack ret=%d sector=%u mode=%d", cdvd.ReadErr, cdvd.SeekToSector, cdvd.ReadMode);
 
 			// Set the reading block flag.  If a seek is pending then Readed will
 			// take priority in the handler anyway.  If the read is contiguous then

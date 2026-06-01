@@ -49,6 +49,7 @@ namespace Ps2MemSize
 
 namespace SysMemory
 {
+	static void TraceMemoryMap(const std::string& message);
 	static u8* TryAllocateVirtualMemory(const char* name, void* file_handle, uptr base, size_t size);
 	static u8* AllocateVirtualMemory(const char* name, void* file_handle, size_t size, size_t offset_from_base);
 
@@ -74,6 +75,11 @@ static bool s_ba_error_detected = false;
 static u16 s_ba_current_reg = 0;
 static bool s_extra_memory = false;
 
+void SysMemory::TraceMemoryMap(const std::string& message)
+{
+	Host::ReportInfoAsync("AMPS2", "SysMemory " + message);
+}
+
 namespace HostMemoryMap
 {
 	// For debuggers
@@ -90,11 +96,21 @@ u8* SysMemory::TryAllocateVirtualMemory(const char* name, void* file_handle, upt
 {
 	u8* baseptr;
 
-	if (file_handle)
-		baseptr = static_cast<u8*>(HostSys::MapSharedMemory(file_handle, 0, (void*)base, size, PageAccess_ReadWrite()));
-	else
-		baseptr = static_cast<u8*>(HostSys::Mmap((void*)base, size, PageAccess_Any()));
+	TraceMemoryMap(fmt::format("TryAllocateVirtualMemory begin name={} base=0x{:016X} size=0x{:X} file={}",
+		name, base, size, file_handle ? 1 : 0));
 
+	if (file_handle)
+	{
+		TraceMemoryMap(fmt::format("MapSharedMemory call name={} base=0x{:016X} size=0x{:X}", name, base, size));
+		baseptr = static_cast<u8*>(HostSys::MapSharedMemory(file_handle, 0, (void*)base, size, PageAccess_ReadWrite()));
+	}
+	else
+	{
+		TraceMemoryMap(fmt::format("Mmap call name={} base=0x{:016X} size=0x{:X}", name, base, size));
+		baseptr = static_cast<u8*>(HostSys::Mmap((void*)base, size, PageAccess_Any()));
+	}
+
+	TraceMemoryMap(fmt::format("TryAllocateVirtualMemory result name={} ptr=0x{:016X}", name, (uptr)baseptr));
 	if (!baseptr)
 		return nullptr;
 
@@ -159,7 +175,10 @@ u8* SysMemory::AllocateVirtualMemory(const char* name, void* file_handle, size_t
 
 bool SysMemory::AllocateMemoryMap()
 {
+	TraceMemoryMap(fmt::format("AllocateMemoryMap begin main=0x{:X} code=0x{:X}", HostMemoryMap::MainSize, HostMemoryMap::CodeSize));
+	TraceMemoryMap("CreateSharedMemory begin");
 	s_data_memory_file_handle = HostSys::CreateSharedMemory(HostSys::GetFileMappingName("pcsx2").c_str(), HostMemoryMap::MainSize);
+	TraceMemoryMap(fmt::format("CreateSharedMemory result handle=0x{:016X}", reinterpret_cast<uptr>(s_data_memory_file_handle)));
 	if (!s_data_memory_file_handle)
 	{
 		Host::ReportErrorAsync("Error", "Failed to create shared memory file.");
@@ -167,25 +186,32 @@ bool SysMemory::AllocateMemoryMap()
 		return false;
 	}
 
+	TraceMemoryMap("Data Memory allocation begin");
 	if ((s_data_memory = AllocateVirtualMemory("Data Memory", s_data_memory_file_handle, HostMemoryMap::MainSize, 0)) == nullptr)
 	{
 		Host::ReportErrorAsync("Error", "Failed to map data memory at an acceptable location.");
 		ReleaseMemoryMap();
 		return false;
 	}
+	TraceMemoryMap(fmt::format("Data Memory allocation ok ptr=0x{:016X}", (uptr)s_data_memory));
 
+	TraceMemoryMap("Code Memory allocation begin");
 	if ((s_code_memory = AllocateVirtualMemory("Code Memory", nullptr, HostMemoryMap::CodeSize, HostMemoryMap::MainSize)) == nullptr)
 	{
 		Host::ReportErrorAsync("Error", "Failed to allocate code memory at an acceptable location.");
 		ReleaseMemoryMap();
 		return false;
 	}
+	TraceMemoryMap(fmt::format("Code Memory allocation ok ptr=0x{:016X}", (uptr)s_code_memory));
 
 	HostMemoryMap::EEmem = (uptr)(s_data_memory + HostMemoryMap::EEmemOffset);
 	HostMemoryMap::IOPmem = (uptr)(s_data_memory + HostMemoryMap::IOPmemOffset);
 	HostMemoryMap::VUmem = (uptr)(s_data_memory + HostMemoryMap::VUmemSize);
+	TraceMemoryMap(fmt::format("Pointers set EEmem=0x{:016X} IOPmem=0x{:016X} VUmem=0x{:016X}",
+		HostMemoryMap::EEmem, HostMemoryMap::IOPmem, HostMemoryMap::VUmem));
 
 	DumpMemoryMap();
+	TraceMemoryMap("AllocateMemoryMap done");
 	return true;
 }
 
@@ -238,17 +264,23 @@ void SysMemory::ReleaseMemoryMap()
 bool SysMemory::Allocate()
 {
 	DevCon.WriteLn(Color_StrongBlue, "Allocating host memory for virtual systems...");
+	TraceMemoryMap("Allocate begin");
 
 	if (!AllocateMemoryMap())
 		return false;
 
+	TraceMemoryMap("memAllocate begin");
 	memAllocate();
+	TraceMemoryMap("iopMemAlloc begin");
 	iopMemAlloc();
+	TraceMemoryMap("vuMemAllocate begin");
 	vuMemAllocate();
 
+	TraceMemoryMap("vtlb_Core_Alloc begin");
 	if (!vtlb_Core_Alloc())
 		return false;
 
+	TraceMemoryMap("Allocate done");
 	return true;
 }
 
@@ -256,9 +288,15 @@ void SysMemory::Reset()
 {
 	DevCon.WriteLn(Color_StrongBlue, "Resetting host memory for virtual systems...");
 
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: SysMemory::Reset memReset begin");
 	memReset();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: SysMemory::Reset memReset done");
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: SysMemory::Reset iopMemReset begin");
 	iopMemReset();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: SysMemory::Reset iopMemReset done");
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: SysMemory::Reset vuMemReset begin");
 	vuMemReset();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: SysMemory::Reset vuMemReset done");
 
 	// Note: newVif is reset as part of other VIF structures.
 	// Software is reset on the GS thread.
@@ -1100,7 +1138,9 @@ void memReset()
 	memset(pCache,0,sizeof(_cacheS)*64);
 #endif
 
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: memReset vtlb_Init begin");
 	vtlb_Init();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: memReset vtlb_Init done");
 
 	null_handler = vtlb_RegisterHandler(nullRead8, nullRead16, nullRead32, nullRead64, nullRead128,
 		nullWrite8, nullWrite16, nullWrite32, nullWrite64, nullWrite128);
@@ -1195,15 +1235,25 @@ void memReset()
 	//vtlb_VMap(0x00000000,0x00000000,0x20000000);
 	//vtlb_VMapUnmap(0x20000000,0x60000000);
 
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: memReset memMapPhy begin");
 	memMapPhy();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: memReset memMapPhy done");
 	memMapVUmicro();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: memReset memMapVUmicro done");
 	memMapKernelMem();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: memReset memMapKernelMem done");
 	memMapSupervisorMem();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: memReset memMapSupervisorMem done");
 	memMapUserMem();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: memReset memMapUserMem done");
 	memSetKernelMode();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: memReset memSetKernelMode done");
 
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: memReset vtlb_VMap begin");
 	vtlb_VMap(0x00000000,0x00000000,0x20000000);
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: memReset vtlb_VMap done");
 	vtlb_VMapUnmap(0x20000000,0x60000000);
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: memReset vtlb_VMapUnmap done");
 
 	std::memset(s_ba, 0, sizeof(s_ba));
 
@@ -1218,7 +1268,9 @@ void memReset()
 
 	// BIOS is included in eeMem, so it needs to be copied after zeroing.
 	std::memset(eeMem, 0, sizeof(*eeMem));
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: memReset CopyBIOSToMemory begin");
 	CopyBIOSToMemory();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("AMPS2: memReset done");
 }
 
 void memRelease()

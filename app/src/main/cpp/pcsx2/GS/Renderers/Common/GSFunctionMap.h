@@ -10,6 +10,11 @@
 
 #include <cinttypes>
 
+#if defined(PCSX2_IOS)
+extern "C" void* AMIOSGetJITWriteAlias(void* address);
+extern "C" void AMIOSPrepareJITRegion(void* address, size_t size);
+#endif
+
 template <class KEY, class VALUE>
 class GSFunctionMap
 {
@@ -180,12 +185,18 @@ public:
 		}
 		else
 		{
-			HostSys::BeginCodeWrite();
+				HostSys::BeginCodeWrite();
 
-			u8* code_ptr = GSCodeReserve::ReserveMemory(MAX_SIZE);
-			CG cg(key, code_ptr, MAX_SIZE);
-			cg.Generate();
-			pxAssert(cg.GetSize() < MAX_SIZE);
+				u8* code_ptr = GSCodeReserve::ReserveMemory(MAX_SIZE);
+#if defined(PCSX2_IOS)
+				AMIOSPrepareJITRegion(code_ptr, MAX_SIZE);
+				u8* write_ptr = static_cast<u8*>(AMIOSGetJITWriteAlias(code_ptr));
+#else
+				u8* write_ptr = code_ptr;
+#endif
+				CG cg(key, write_ptr, MAX_SIZE);
+				cg.Generate();
+				pxAssert(cg.GetSize() < MAX_SIZE);
 
 #if 0
 			fprintf(stderr, "%s Location:%p Size:%zu Key:%llx\n", m_name.c_str(), code_ptr, cg.getSize(), (u64)key);
@@ -196,13 +207,13 @@ public:
 			const u32 size = static_cast<u32>(cg.GetSize());
 			GSCodeReserve::CommitMemory(size);
 
-			HostSys::EndCodeWrite();
-			HostSys::FlushInstructionCache(code_ptr, static_cast<u32>(size));
+				HostSys::EndCodeWrite();
+				HostSys::FlushInstructionCache(code_ptr, static_cast<u32>(size));
 
-			ret = (VALUE)cg.GetCode();
+				ret = (VALUE)code_ptr;
 
-			m_cgmap[key] = ret;
-		}
+				m_cgmap[key] = ret;
+			}
 
 		return ret;
 	}

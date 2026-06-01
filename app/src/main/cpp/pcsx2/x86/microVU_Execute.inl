@@ -23,6 +23,7 @@ static bool mvuNeedsFPCRUpdate(mV)
 void mVUdispatcherAB(mV)
 {
     mVU.startFunct = armGetCurrentCodePointer();
+    armAsm->bti(a64::EmitBTI_jc);
 	{
 //		xScopedStackFrame frame(false, true);
         armBeginStackFrame();
@@ -133,6 +134,7 @@ void mVUdispatcherAB(mV)
 void mVUdispatcherCD(mV)
 {
     mVU.startFunctXG = armGetCurrentCodePointer();
+    armAsm->bti(a64::EmitBTI_jc);
 	{
 //		xScopedStackFrame frame(false, true);
         armBeginStackFrame();
@@ -188,6 +190,7 @@ void mVUdispatcherCD(mV)
 static void mVUGenerateWaitMTVU(mV)
 {
     mVU.waitMTVU = armGetCurrentCodePointer();
+    armAsm->bti(a64::EmitBTI_jc);
 
     int i;
     for (i = 0; i < static_cast<int>(iREGCNT_GPR); ++i)
@@ -247,6 +250,7 @@ static void mVUGenerateWaitMTVU(mV)
 static void mVUGenerateCopyPipelineState(mV)
 {
     mVU.copyPLState = armGetCurrentCodePointer();
+    armAsm->bti(a64::EmitBTI_jc);
     {
         auto mop_rax = a64::MemOperand(RAX);
         auto mop_lpState = PTR_MVU(microVU[mVU.index].prog.lpState);
@@ -294,6 +298,7 @@ static void mVUGenerateCopyPipelineState(mV)
 static void mVUGenerateCompareState(mV)
 {
     mVU.compareStateF = armGetCurrentCodePointer();
+    armAsm->bti(a64::EmitBTI_jc);
     {
         auto mop_arg1reg = a64::MemOperand(RCX);
         auto mop_arg2reg = a64::MemOperand(RDX);

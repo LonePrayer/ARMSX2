@@ -19,6 +19,41 @@
 GS_VideoMode gsVideoMode = GS_VideoMode::Uninitialized;
 bool gsIsInterlaced = false;
 
+static __fi bool AmethystTracePollWindow()
+{
+	return (cpuRegs.pc >= 0x00101180 && cpuRegs.pc <= 0x00101520) ||
+		(cpuRegs.pc >= 0x002817b0 && cpuRegs.pc <= 0x002817d0);
+}
+
+static __fi bool AmethystTraceAddress(u32 addr)
+{
+	return (addr >= 0x10000000 && addr < 0x10010000) ||
+		(addr >= 0x12000000 && addr < 0x12002000);
+}
+
+static void AmethystTraceMemoryAccess(const char* op, u32 addr, u64 value, int rt)
+{
+	static u32 s_amethyst_mem_trace_count = 0;
+	if (!AmethystTracePollWindow() && !AmethystTraceAddress(addr))
+		return;
+	if (s_amethyst_mem_trace_count >= 512 && ((s_amethyst_mem_trace_count & 0x3ff) != 0))
+	{
+		++s_amethyst_mem_trace_count;
+		return;
+	}
+
+	Console.WriteLn("AMPS2 EE mem %s pc=0x%08x ra=0x%08x addr=0x%08x value=0x%016llx rt=%d rs=%d rtBefore=0x%016llx a0=0x%08x a1=0x%08x v0=0x%08x v1=0x%08x t0=0x%08x t1=0x%08x csr=0x%08x smode1=0x%08x smode2=0x%08x cycle=%u",
+		op, cpuRegs.pc, cpuRegs.GPR.n.ra.UL[0], addr,
+		static_cast<unsigned long long>(value), rt, _Rs_,
+		static_cast<unsigned long long>(cpuRegs.GPR.r[rt].UD[0]),
+		cpuRegs.GPR.n.a0.UL[0], cpuRegs.GPR.n.a1.UL[0],
+		cpuRegs.GPR.n.v0.UL[0], cpuRegs.GPR.n.v1.UL[0],
+		cpuRegs.GPR.n.t0.UL[0], cpuRegs.GPR.n.t1.UL[0],
+		CSRreg._u32, *(u32*)PS2GS_BASE(GS_SMODE1), *(u32*)PS2GS_BASE(GS_SMODE2),
+		cpuRegs.cycle);
+	++s_amethyst_mem_trace_count;
+}
+
 static __fi bool _add64_Overflow( s64 x, s64 y, s64 &ret )
 {
 	const s64 result = x + y;
@@ -569,6 +604,7 @@ void LW()
 		RaiseAddressError(addr, false);
 
 	u32 temp = memRead32(addr);
+	AmethystTraceMemoryAccess("LW", addr, temp, _Rt_);
 
 	if (!_Rt_) return;
 	cpuRegs.GPR.r[_Rt_].SD[0] = (s32)temp;
@@ -582,6 +618,7 @@ void LWU()
 		RaiseAddressError(addr, false);
 
 	u32 temp = memRead32(addr);
+	AmethystTraceMemoryAccess("LWU", addr, temp, _Rt_);
 
 	if (!_Rt_) return;
 	cpuRegs.GPR.r[_Rt_].UD[0] = temp;
@@ -741,7 +778,8 @@ void SW()
 	if (addr & 3) [[unlikely]]
 		RaiseAddressError(addr, true);
 
-  memWrite32(addr, cpuRegs.GPR.r[_Rt_].UL[0]);
+	AmethystTraceMemoryAccess("SW", addr, cpuRegs.GPR.r[_Rt_].UL[0], _Rt_);
+	memWrite32(addr, cpuRegs.GPR.r[_Rt_].UL[0]);
 }
 
 static const u32 SWL_MASK[4] = { 0xffffff00, 0xffff0000, 0xff000000, 0x00000000 };
@@ -798,7 +836,8 @@ void SD()
 	if (addr & 7) [[unlikely]]
 		RaiseAddressError(addr, true);
 
-    memWrite64(addr,cpuRegs.GPR.r[_Rt_].UD[0]);
+	AmethystTraceMemoryAccess("SD", addr, cpuRegs.GPR.r[_Rt_].UD[0], _Rt_);
+	memWrite64(addr,cpuRegs.GPR.r[_Rt_].UD[0]);
 }
 
 static const u64 SDL_MASK[8] =
@@ -840,6 +879,7 @@ void SQ()
 	// an address error due to unaligned access isn't possible like it is on other loads/stores.
 
 	u32 addr = cpuRegs.GPR.r[_Rs_].UL[0] + _Imm_;
+	AmethystTraceMemoryAccess("SQ", addr & ~0xf, cpuRegs.GPR.r[_Rt_].UD[0], _Rt_);
 	memWrite128(addr & ~0xf, cpuRegs.GPR.r[_Rt_].UQ);
 }
 
@@ -880,6 +920,20 @@ void SYSCALL()
 		call = cpuRegs.GPR.n.v1.UC[0];
 
 	BIOS_LOG("Bios call: %s (%x)", R5900::bios[call], call);
+
+	static u32 s_amethyst_syscall_log_count = 0;
+	const bool log_syscall =
+		call == Syscall::SetGsCrt || call == Syscall::ExecPS2 ||
+		s_amethyst_syscall_log_count < 64 ||
+		((s_amethyst_syscall_log_count & 0xffff) == 0);
+	if (log_syscall)
+	{
+		Console.WriteLn("AMPS2 syscall call=0x%02x name=%s pc=0x%08x v1=0x%08x a0=0x%08x a1=0x%08x a2=0x%08x a3=0x%08x t0=0x%08x t1=0x%08x",
+			call, R5900::bios[call], cpuRegs.pc, cpuRegs.GPR.n.v1.UL[0],
+			cpuRegs.GPR.n.a0.UL[0], cpuRegs.GPR.n.a1.UL[0], cpuRegs.GPR.n.a2.UL[0],
+			cpuRegs.GPR.n.a3.UL[0], cpuRegs.GPR.n.t0.UL[0], cpuRegs.GPR.n.t1.UL[0]);
+	}
+	++s_amethyst_syscall_log_count;
 
 
 	switch (static_cast<Syscall>(call))

@@ -261,8 +261,32 @@ static __fi void _doBranch_shared(u32 tar)
 
 static void doBranch( u32 target )
 {
+	const bool log_amethyst_wait_loop =
+		(target == 0x00276378 && cpuRegs.pc >= 0x002763b0 && cpuRegs.pc <= 0x002763b8) ||
+		(target == 0x002817c0 && cpuRegs.pc >= 0x002817c0 && cpuRegs.pc <= 0x002817d0);
+	if (log_amethyst_wait_loop)
+	{
+		static u32 s_amethyst_wait_loop_log_count = 0;
+		if (s_amethyst_wait_loop_log_count < 24 || ((s_amethyst_wait_loop_log_count & 0xfff) == 0))
+		{
+			Console.WriteLn("AMPS2 EE wait-branch before target=0x%08x pc=0x%08x cycle=%u next=%u interrupt=0x%08x blockCycles=%u waitLoop=%d",
+				target, cpuRegs.pc, cpuRegs.cycle, cpuRegs.nextEventCycle, cpuRegs.interrupt,
+				cpuBlockCycles, static_cast<int>(EmuConfig.Speedhacks.WaitLoop));
+		}
+		++s_amethyst_wait_loop_log_count;
+	}
 	_doBranch_shared( target );
 	intUpdateCPUCycles();
+	if (log_amethyst_wait_loop)
+	{
+		static u32 s_amethyst_wait_loop_after_log_count = 0;
+		if (s_amethyst_wait_loop_after_log_count < 24 || ((s_amethyst_wait_loop_after_log_count & 0xfff) == 0))
+		{
+			Console.WriteLn("AMPS2 EE wait-branch after target=0x%08x pc=0x%08x cycle=%u next=%u interrupt=0x%08x blockCycles=%u",
+				target, cpuRegs.pc, cpuRegs.cycle, cpuRegs.nextEventCycle, cpuRegs.interrupt, cpuBlockCycles);
+		}
+		++s_amethyst_wait_loop_after_log_count;
+	}
 	intEventTest();
 }
 
@@ -333,7 +357,22 @@ void BEQ()  // Branch if Rs == Rt
 
 void BNE()  // Branch if Rs != Rt
 {
-	if (cpuRegs.GPR.r[_Rs_].SD[0] != cpuRegs.GPR.r[_Rt_].SD[0])
+	const bool taken = (cpuRegs.GPR.r[_Rs_].SD[0] != cpuRegs.GPR.r[_Rt_].SD[0]);
+	if (cpuRegs.pc >= 0x002817c0 && cpuRegs.pc <= 0x002817d0)
+	{
+		static u32 s_amethyst_bne_log_count = 0;
+		if (s_amethyst_bne_log_count < 128 || ((s_amethyst_bne_log_count & 0x3ff) == 0))
+		{
+			Console.WriteLn("AMPS2 EE BNE pc=0x%08x target=0x%08x taken=%d rs=%d rt=%d rsVal=0x%016llx rtVal=0x%016llx ra=0x%08x v0=0x%08x a0=0x%08x t0=0x%08x cycle=%u",
+				cpuRegs.pc, _BranchTarget_, static_cast<int>(taken), _Rs_, _Rt_,
+				static_cast<unsigned long long>(cpuRegs.GPR.r[_Rs_].UD[0]),
+				static_cast<unsigned long long>(cpuRegs.GPR.r[_Rt_].UD[0]),
+				cpuRegs.GPR.n.ra.UL[0], cpuRegs.GPR.n.v0.UL[0],
+				cpuRegs.GPR.n.a0.UL[0], cpuRegs.GPR.n.t0.UL[0], cpuRegs.cycle);
+		}
+		++s_amethyst_bne_log_count;
+	}
+	if (taken)
 		doBranch(_BranchTarget_);
 	else
 		intEventTest();

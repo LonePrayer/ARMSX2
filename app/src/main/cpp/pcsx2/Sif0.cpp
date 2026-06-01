@@ -8,7 +8,19 @@
 #include "Sif.h"
 #include "IopHw.h"
 
+#include <atomic>
+#include <cstdio>
+
 _sif sif0;
+
+extern "C" uint64_t g_amps2_sif0_dma_count = 0;
+extern "C" uint64_t g_amps2_sif0_iop_xfer = 0;
+extern "C" uint64_t g_amps2_sif0_ee_xfer = 0;
+extern "C" uint64_t g_amps2_sif0_endee = 0;
+extern "C" uint64_t g_amps2_sif0_endiop = 0;
+extern "C" uint64_t g_amps2_sif0_eetag = 0;
+extern "C" uint64_t g_amps2_sif0_eetag_end = 0;
+extern "C" uint64_t g_amps2_sif0_eeirq = 0;
 
 static bool done = false;
 
@@ -80,6 +92,7 @@ static __fi bool ProcessEETag()
 {
 	alignas(16) static u32 tag[4];
 	tDMA_TAG& ptag(*(tDMA_TAG*)tag);
+	g_amps2_sif0_eetag++;
 
 	sif0.fifo.read((u32*)&tag[0], 4); // Tag
 	SIF_LOG("SIF0 EE read tag: %x %x %x %x", tag[0], tag[1], tag[2], tag[3]);
@@ -107,6 +120,7 @@ static __fi bool ProcessEETag()
 
 		case TAG_END:
 			sif0.ee.end = true;
+			g_amps2_sif0_eetag_end++;
 			break;
 	}
 	return true;
@@ -147,6 +161,7 @@ static __fi bool ProcessIOPTag()
 static __fi void EndEE()
 {
 	SIF_LOG("Sif0: End EE");
+	g_amps2_sif0_endee++;
 	sif0.ee.end = false;
 	sif0.ee.busy = false;
 	if (sif0.ee.cycles == 0)
@@ -162,6 +177,7 @@ static __fi void EndEE()
 static __fi void EndIOP()
 {
 	SIF_LOG("Sif0: End IOP");
+	g_amps2_sif0_endiop++;
 	sif0data = 0;
 	sif0.iop.end = false;
 	sif0.iop.busy = false;
@@ -293,6 +309,7 @@ static __fi void Sif0End()
 __fi void SIF0Dma()
 {
 	int BusyCheck = 0;
+	g_amps2_sif0_dma_count++;
 	Sif0Init();
 
 	do
@@ -312,6 +329,7 @@ __fi void SIF0Dma()
 			if(sif0.fifo.sif_free() > 0 || (sif0.iop.end && sif0.iop.counter == 0))
 			{
 				BusyCheck++;
+				g_amps2_sif0_iop_xfer++;
 				HandleIOPTransfer();
 			}
 		}
@@ -320,6 +338,7 @@ __fi void SIF0Dma()
 			if(sif0.fifo.size >= 4 || (sif0.ee.end && sif0ch.qwc == 0))
 			{
 				BusyCheck++;
+				g_amps2_sif0_ee_xfer++;
 				HandleEETransfer();
 			}
 		}
@@ -336,6 +355,7 @@ __fi void  sif0Interrupt()
 
 __fi void  EEsif0Interrupt()
 {
+	g_amps2_sif0_eeirq++;
 	hwDmacIrq(DMAC_SIF0);
 	sif0ch.chcr.STR = false;
 }

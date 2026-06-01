@@ -93,7 +93,12 @@ const a64::WRegister
 
 #else
 
+#if defined(PCSX2_IOS)
+extern "C" void* AMIOSGetJITWriteAlias(void* address);
+#endif
+
 thread_local u8* x86Ptr;
+thread_local u8* x86WritePtr;
 
 namespace x86Emitter
 {
@@ -121,6 +126,15 @@ namespace x86Emitter
 	__fi void xWrite64(u64 val)
 	{
 		xWrite(val);
+	}
+
+	void* xGetWritablePtr(void* ptr)
+	{
+#if defined(PCSX2_IOS)
+		return AMIOSGetJITWriteAlias(ptr);
+#else
+		return ptr;
+#endif
 	}
 
 	// Empty initializers are due to frivolously pointless GCC errors (it demands the
@@ -580,6 +594,7 @@ const xRegister32
 	__emitinline void xSetPtr(void* ptr)
 	{
 		x86Ptr = (u8*)ptr;
+		x86WritePtr = static_cast<u8*>(xGetWritablePtr(ptr));
 	}
 
 	// Retrieves the current emitter buffer target address.
@@ -593,7 +608,9 @@ const xRegister32
 	__emitinline void xAlignPtr(uint bytes)
 	{
 		// forward align
+		const u8* old_ptr = x86Ptr;
 		x86Ptr = (u8*)(((uptr)x86Ptr + bytes - 1) & ~(uptr)(bytes - 1));
+		x86WritePtr += x86Ptr - old_ptr;
 	}
 
 	// Performs best-case alignment for the target CPU, for use prior to starting a new
@@ -631,7 +648,10 @@ const xRegister32
 				xWrite8(0xcc);
 		}
 		else
+		{
 			x86Ptr += bytes;
+			x86WritePtr += bytes;
+		}
 	}
 
 	// --------------------------------------------------------------------------------------

@@ -29,10 +29,13 @@
 
 #include "fmt/format.h"
 
+#include <atomic>
+
 using namespace R5900;	// for R5900 disasm tools
 
 s32 EEsCycle;		// used to sync the IOP to the EE
 u32 EEoCycle;
+std::atomic<int> g_amethyst_ee_event_stage{0};
 
 alignas(64) cpuRegistersPack g_cpuRegistersPack;
 alignas(16) tlbs tlb[48];
@@ -97,6 +100,7 @@ void cpuReset()
 
 __ri void cpuException(u32 code, u32 bd)
 {
+	const u32 old_pc = cpuRegs.pc;
 	bool errLevel2, checkStatus;
 	u32 offset = 0;
 
@@ -164,6 +168,20 @@ __ri void cpuException(u32 code, u32 bd)
 		cpuRegs.pc = 0x80000000 + offset;
 	else
 		cpuRegs.pc = 0xBFC00200 + offset;
+
+	static u32 s_amethyst_exception_log_count = 0;
+	const bool is_regular_interrupt = (code == 0x20) || (code == 0x400) || (code == 0x800);
+	const bool log_exception =
+		(!is_regular_interrupt) || (s_amethyst_exception_log_count < 16) ||
+		((s_amethyst_exception_log_count & 0x3ffff) == 0);
+	if (log_exception)
+	{
+		Console.WriteLn("AMPS2 cpuException oldpc=0x%08x newpc=0x%08x code=0x%08x bd=%u status=0x%08x cause=0x%08x epc=0x%08x interrupt=0x%08x dmastall=0x%08x dmac_stat=0x%04x dmac_mask=0x%04x",
+			old_pc, cpuRegs.pc, code, bd, cpuRegs.CP0.n.Status.val, cpuRegs.CP0.n.Cause,
+			cpuRegs.CP0.n.EPC, cpuRegs.interrupt, cpuRegs.dmastall,
+			static_cast<u32>(psHu16(0xe010)), static_cast<u32>(psHu16(0xe012)));
+	}
+	++s_amethyst_exception_log_count;
 
 	cpuUpdateOperationMode();
 }
@@ -263,6 +281,12 @@ static __fi void TESTINT( u8 n, void (*callback)() )
 // being included into R5900.cpp.
 static __fi bool _cpuTestInterrupts()
 {
+	static u32 s_amethyst_interrupt_scan_log_count = 0;
+	const auto log_scan = [&]() {
+		const bool has_gif = (cpuRegs.interrupt & (1 << DMAC_GIF)) || (cpuRegs.dmastall & (1 << DMAC_GIF)) ||
+			(psHu16(DMAC_STAT) & (1 << DMAC_GIF));
+		return has_gif && ((s_amethyst_interrupt_scan_log_count < 256) || ((s_amethyst_interrupt_scan_log_count & 0xfff) == 0));
+	};
 
 	if (!dmacRegs.ctrl.DMAE || (psHu8(DMAC_ENABLER+2) & 1))
 	{
@@ -274,11 +298,38 @@ static __fi bool _cpuTestInterrupts()
 
 	while (eeRunInterruptScan == INT_RUNNING)
 	{
+		const bool should_log_scan = log_scan();
+		if (should_log_scan)
+		{
+			Console.WriteLn("AMPS2 InterruptScan enter pc=0x%08x cycle=%u interrupt=0x%08x dmastall=0x%08x dmac_stat=0x%04x dmac_mask=0x%04x qwc_gif=%u str_gif=%u run=%d",
+				cpuRegs.pc, cpuRegs.cycle, cpuRegs.interrupt, cpuRegs.dmastall,
+				static_cast<u32>(psHu16(DMAC_STAT)), static_cast<u32>(psHu16(DMAC_STAT + 2)),
+				gifch.qwc, static_cast<u32>(gifch.chcr.STR), static_cast<int>(eeRunInterruptScan));
+		}
 		/* These are 'pcsx2 interrupts', they handle asynchronous stuff
 		   that depends on the cycle timings */
 		TESTINT(VU_MTVU_BUSY, MTVUInterrupt);
+		if (should_log_scan && (cpuRegs.interrupt & (1 << DMAC_VIF1)))
+		{
+			Console.WriteLn("AMPS2 InterruptScan before VIF1 pc=0x%08x cycle=%u interrupt=0x%08x dmastall=0x%08x dmac_stat=0x%04x dmac_mask=0x%04x",
+				cpuRegs.pc, cpuRegs.cycle, cpuRegs.interrupt, cpuRegs.dmastall,
+				static_cast<u32>(psHu16(DMAC_STAT)), static_cast<u32>(psHu16(DMAC_STAT + 2)));
+		}
 		TESTINT(DMAC_VIF1, vif1Interrupt);
+		if (should_log_scan)
+		{
+			Console.WriteLn("AMPS2 InterruptScan after VIF1 pc=0x%08x cycle=%u interrupt=0x%08x dmastall=0x%08x dmac_stat=0x%04x dmac_mask=0x%04x",
+				cpuRegs.pc, cpuRegs.cycle, cpuRegs.interrupt, cpuRegs.dmastall,
+				static_cast<u32>(psHu16(DMAC_STAT)), static_cast<u32>(psHu16(DMAC_STAT + 2)));
+		}
 		TESTINT(DMAC_GIF, gifInterrupt);
+		if (should_log_scan)
+		{
+			Console.WriteLn("AMPS2 InterruptScan after GIF pc=0x%08x cycle=%u interrupt=0x%08x dmastall=0x%08x dmac_stat=0x%04x dmac_mask=0x%04x qwc_gif=%u str_gif=%u run=%d",
+				cpuRegs.pc, cpuRegs.cycle, cpuRegs.interrupt, cpuRegs.dmastall,
+				static_cast<u32>(psHu16(DMAC_STAT)), static_cast<u32>(psHu16(DMAC_STAT + 2)),
+				gifch.qwc, static_cast<u32>(gifch.chcr.STR), static_cast<int>(eeRunInterruptScan));
+		}
 		TESTINT(DMAC_SIF0, EEsif0Interrupt);
 		TESTINT(DMAC_SIF1, EEsif1Interrupt);
 		// Profile-guided Optimization (sorta)
@@ -309,11 +360,21 @@ static __fi bool _cpuTestInterrupts()
 			eeRunInterruptScan = INT_RUNNING;
 		else
 			break;
+		++s_amethyst_interrupt_scan_log_count;
 	}
 
 	eeRunInterruptScan = INT_NOT_RUNNING;
 
-	if ((cpuRegs.interrupt & 0x1FFFF) & ~cpuRegs.dmastall)
+	const bool has_more = (cpuRegs.interrupt & 0x1FFFF) & ~cpuRegs.dmastall;
+	if (log_scan())
+	{
+		Console.WriteLn("AMPS2 InterruptScan exit pc=0x%08x cycle=%u interrupt=0x%08x dmastall=0x%08x dmac_stat=0x%04x dmac_mask=0x%04x more=%u",
+			cpuRegs.pc, cpuRegs.cycle, cpuRegs.interrupt, cpuRegs.dmastall,
+			static_cast<u32>(psHu16(DMAC_STAT)), static_cast<u32>(psHu16(DMAC_STAT + 2)), static_cast<u32>(has_more));
+		++s_amethyst_interrupt_scan_log_count;
+	}
+
+	if (has_more)
 		return true;
 	else
 		return false;
@@ -364,6 +425,29 @@ static bool cpuIntsEnabled(int Interrupt)
 // and the recompiler.  (moved here to help alleviate redundant code)
 __fi void _cpuEventTest_Shared()
 {
+	static u32 s_amethyst_event_log_count = 0;
+	static u32 s_amethyst_exception_sample_count = 0;
+	g_amethyst_ee_event_stage.store(1, std::memory_order_relaxed);
+	const bool log_gif_event =
+		((cpuRegs.interrupt & (1 << DMAC_GIF)) || (cpuRegs.dmastall & (1 << DMAC_GIF))) &&
+		((s_amethyst_event_log_count < 256) || ((s_amethyst_event_log_count & 0xfff) == 0));
+	const bool log_exception_sample =
+		(cpuRegs.pc >= 0x80000200 && cpuRegs.pc < 0x80000300) &&
+		((s_amethyst_exception_sample_count++ & 0x3fff) == 0);
+	if (log_gif_event)
+	{
+		Console.WriteLn("AMPS2 EventTest enter pc=0x%08x cycle=%u next=%u interrupt=0x%08x dmastall=0x%08x dmac_stat=0x%04x dmac_mask=0x%04x",
+			cpuRegs.pc, cpuRegs.cycle, cpuRegs.nextEventCycle, cpuRegs.interrupt, cpuRegs.dmastall,
+			static_cast<u32>(psHu16(0xe010)), static_cast<u32>(psHu16(0xe012)));
+	}
+	else if (log_exception_sample)
+	{
+		Console.WriteLn("AMPS2 EventTest exception-sample pc=0x%08x epc=0x%08x cause=0x%08x status=0x%08x cycle=%u interrupt=0x%08x dmastall=0x%08x",
+			cpuRegs.pc, cpuRegs.CP0.n.EPC, cpuRegs.CP0.n.Cause, cpuRegs.CP0.n.Status.val,
+			cpuRegs.cycle, cpuRegs.interrupt, cpuRegs.dmastall);
+	}
+	++s_amethyst_event_log_count;
+
 	eeEventTestIsActive = true;
 	cpuRegs.nextEventCycle = cpuRegs.cycle + eeWaitCycles;
 	cpuRegs.lastEventCycle = cpuRegs.cycle;
@@ -375,6 +459,7 @@ __fi void _cpuEventTest_Shared()
 	uint mask = intcInterrupt() | dmacInterrupt();
 	if (cpuIntsEnabled(mask))
 		cpuException(mask, cpuRegs.branch);
+	g_amethyst_ee_event_stage.store(2, std::memory_order_relaxed);
 
 	// ---- IOP -------------
 	// * It's important to run a iopEventTest before calling ExecuteBlock. This
@@ -388,6 +473,7 @@ __fi void _cpuEventTest_Shared()
 	// It's also important to sync up the IOP before updating the timers, since gates will depend on starting/stopping in the right place!
 	EEsCycle += cpuRegs.cycle - EEoCycle;
 	EEoCycle = cpuRegs.cycle;
+	g_amethyst_ee_event_stage.store(3, std::memory_order_relaxed);
 
 	if (EEsCycle > 0)
 		iopEventAction = true;
@@ -397,12 +483,15 @@ __fi void _cpuEventTest_Shared()
 		//if( EEsCycle < -450 )
 		//	Console.WriteLn( " IOP ahead by: %d cycles", -EEsCycle );
 
+		g_amethyst_ee_event_stage.store(4, std::memory_order_relaxed);
 		EEsCycle = psxCpu->ExecuteBlock(EEsCycle);
+		g_amethyst_ee_event_stage.store(5, std::memory_order_relaxed);
 
 		iopEventAction = false;
 	}
 
 	iopEventTest();
+	g_amethyst_ee_event_stage.store(6, std::memory_order_relaxed);
 
 	if (cpuTestCycle(nextStartCounter, nextDeltaCounter))
 	{
@@ -411,6 +500,7 @@ __fi void _cpuEventTest_Shared()
 	}
 
 	_cpuTestTIMR();
+	g_amethyst_ee_event_stage.store(7, std::memory_order_relaxed);
 
 	// ---- Interrupts -------------
 	// These are basically just DMAC-related events, which also piggy-back the same bits as
@@ -418,6 +508,16 @@ __fi void _cpuEventTest_Shared()
 
 	if (cpuRegs.interrupt)
 	{
+		static u32 s_amethyst_event_dma_log_count = 0;
+		const bool log_dma_event =
+			((cpuRegs.interrupt & ((1 << DMAC_GIF) | (1 << DMAC_VIF1))) || (psHu16(DMAC_STAT) & (1 << DMAC_GIF))) &&
+			((s_amethyst_event_dma_log_count < 256) || ((s_amethyst_event_dma_log_count & 0xfff) == 0));
+		if (log_dma_event)
+		{
+			Console.WriteLn("AMPS2 EventTest before-dma pc=0x%08x cycle=%u interrupt=0x%08x dmastall=0x%08x dmac_stat=0x%04x dmac_mask=0x%04x",
+				cpuRegs.pc, cpuRegs.cycle, cpuRegs.interrupt, cpuRegs.dmastall,
+				static_cast<u32>(psHu16(DMAC_STAT)), static_cast<u32>(psHu16(DMAC_STAT + 2)));
+		}
 		// This is a BIOS hack because the coding in the BIOS is terrible but the bug is masked by Data Cache
 		// where a DMA buffer is overwritten without waiting for the transfer to end, which causes the fonts to get all messed up
 		// so to fix it, we run all the DMA's instantly when in the BIOS.
@@ -427,15 +527,49 @@ __fi void _cpuEventTest_Shared()
 			while ((cpuRegs.interrupt & 0x1FFFF) && _cpuTestInterrupts())
 				;
 		}
-		else
-			_cpuTestInterrupts();
+			else
+				_cpuTestInterrupts();
+		if (log_dma_event)
+		{
+			Console.WriteLn("AMPS2 EventTest after-dma-call pc=0x%08x cycle=%u interrupt=0x%08x dmastall=0x%08x dmac_stat=0x%04x dmac_mask=0x%04x",
+				cpuRegs.pc, cpuRegs.cycle, cpuRegs.interrupt, cpuRegs.dmastall,
+				static_cast<u32>(psHu16(DMAC_STAT)), static_cast<u32>(psHu16(DMAC_STAT + 2)));
+			++s_amethyst_event_dma_log_count;
+		}
+	}
+	g_amethyst_ee_event_stage.store(8, std::memory_order_relaxed);
+
+	if (log_gif_event)
+	{
+		Console.WriteLn("AMPS2 EventTest after-dma pc=0x%08x cycle=%u next=%u interrupt=0x%08x dmastall=0x%08x dmac_stat=0x%04x dmac_mask=0x%04x",
+			cpuRegs.pc, cpuRegs.cycle, cpuRegs.nextEventCycle, cpuRegs.interrupt, cpuRegs.dmastall,
+			static_cast<u32>(psHu16(0xe010)), static_cast<u32>(psHu16(0xe012)));
+	}
+
+	if (log_gif_event)
+	{
+		Console.WriteLn("AMPS2 EventTest before-vu pc=0x%08x cycle=%u next=%u interrupt=0x%08x dmastall=0x%08x dmac_stat=0x%04x dmac_mask=0x%04x",
+			cpuRegs.pc, cpuRegs.cycle, cpuRegs.nextEventCycle, cpuRegs.interrupt, cpuRegs.dmastall,
+			static_cast<u32>(psHu16(0xe010)), static_cast<u32>(psHu16(0xe012)));
 	}
 
 	// ---- VU Sync -------------
 	// We're in a EventTest.  All dynarec registers are flushed
 	// so there is no need to freeze registers here.
 	CpuVU0->ExecuteBlock();
+	g_amethyst_ee_event_stage.store(9, std::memory_order_relaxed);
+	if (log_gif_event)
+	{
+		Console.WriteLn("AMPS2 EventTest after-vu0 pc=0x%08x cycle=%u next=%u interrupt=0x%08x dmastall=0x%08x",
+			cpuRegs.pc, cpuRegs.cycle, cpuRegs.nextEventCycle, cpuRegs.interrupt, cpuRegs.dmastall);
+	}
 	CpuVU1->ExecuteBlock();
+	g_amethyst_ee_event_stage.store(10, std::memory_order_relaxed);
+	if (log_gif_event)
+	{
+		Console.WriteLn("AMPS2 EventTest after-vu1 pc=0x%08x cycle=%u next=%u interrupt=0x%08x dmastall=0x%08x",
+			cpuRegs.pc, cpuRegs.cycle, cpuRegs.nextEventCycle, cpuRegs.interrupt, cpuRegs.dmastall);
+	}
 
     // ---- Schedule Next Event Test --------------
 #if defined(ANDROID)
@@ -464,6 +598,14 @@ __fi void _cpuEventTest_Shared()
 	cpuSetNextEvent(nextStartCounter, nextDeltaCounter);
 
 	eeEventTestIsActive = false;
+	g_amethyst_ee_event_stage.store(11, std::memory_order_relaxed);
+
+	if (log_gif_event)
+	{
+		Console.WriteLn("AMPS2 EventTest exit pc=0x%08x cycle=%u next=%u interrupt=0x%08x dmastall=0x%08x dmac_stat=0x%04x dmac_mask=0x%04x",
+			cpuRegs.pc, cpuRegs.cycle, cpuRegs.nextEventCycle, cpuRegs.interrupt, cpuRegs.dmastall,
+			static_cast<u32>(psHu16(0xe010)), static_cast<u32>(psHu16(0xe012)));
+	}
 }
 
 __ri void cpuTestINTCInts()

@@ -31,8 +31,9 @@ namespace x86Emitter
 	template <typename T>
 	inline void xWrite(T val)
 	{
-		*(T*)x86Ptr = val;
+		*(T*)x86WritePtr = val;
 		x86Ptr += sizeof(T);
+		x86WritePtr += sizeof(T);
 	}
 
 	template <typename T1, typename T2>

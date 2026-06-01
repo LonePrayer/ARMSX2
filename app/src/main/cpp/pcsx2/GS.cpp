@@ -6,12 +6,112 @@
 #include "Config.h"
 #include "Gif_Unit.h"
 #include "MTGS.h"
+#include "R5900.h"
 #include "VMManager.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <list>
 
 alignas(16) u8 g_RealGSMem[Ps2MemSize::GSregs];
 static bool s_GSRegistersWritten = false;
+static int s_AmethystGSWriteLogCount = 0;
+static int s_AmethystGSReadLogCount = 0;
+
+static bool AmethystGSRegDiagEnabled()
+{
+	static const bool enabled = []() {
+		const char* value = std::getenv("AM_PS2_GSREG_DIAG");
+		return value && value[0] != '\0' && std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+			std::strcmp(value, "FALSE") != 0;
+	}();
+	return enabled;
+}
+
+static const char* AmethystGSRegName(u32 mem)
+{
+	switch (mem & ~0xf)
+	{
+		case GS_PMODE:
+			return "PMODE";
+		case GS_SMODE1:
+			return "SMODE1";
+		case GS_SMODE2:
+			return "SMODE2";
+		case GS_DISPFB1:
+			return "DISPFB1";
+		case GS_DISPLAY1:
+			return "DISPLAY1";
+		case GS_DISPFB2:
+			return "DISPFB2";
+		case GS_DISPLAY2:
+			return "DISPLAY2";
+		case GS_CSR:
+			return "CSR";
+		case GS_IMR:
+			return "IMR";
+		default:
+			return nullptr;
+	}
+}
+
+static void AmethystLogGSWrite(u32 mem, u64 value, int bits)
+{
+	if (!AmethystGSRegDiagEnabled())
+		return;
+
+	const char* name = AmethystGSRegName(mem);
+	if (!name)
+		return;
+
+	const u64 previous = *(u64*)PS2GS_BASE(mem & ~0xf);
+	if (s_AmethystGSWriteLogCount < 256 || ((cpuRegs.cycle & 0x3fffff) == 0))
+	{
+		std::fprintf(stderr, "AMPS2 GSREG write%d %s mem=0x%08X value=0x%016llX prev=0x%016llX pc=0x%08X cycle=%u\n",
+			bits, name, mem, static_cast<unsigned long long>(value), static_cast<unsigned long long>(previous),
+			cpuRegs.pc, cpuRegs.cycle);
+		if (s_AmethystGSWriteLogCount < 256)
+			s_AmethystGSWriteLogCount++;
+	}
+}
+
+static void AmethystLogGSRead(u32 mem, u64 value, int bits)
+{
+	if (!AmethystGSRegDiagEnabled())
+		return;
+
+	const char* name = AmethystGSRegName(mem);
+	if (!name && (mem < 0x12000000 || mem >= 0x12002000))
+		return;
+	if (s_AmethystGSReadLogCount >= 512 && ((s_AmethystGSReadLogCount & 0x3ff) != 0))
+	{
+		++s_AmethystGSReadLogCount;
+		return;
+	}
+
+	std::fprintf(stderr, "AMPS2 GSREG read%d %s mem=0x%08X value=0x%016llX csr=0x%08X pc=0x%08X ra=0x%08X cycle=%u\n",
+		bits, name ? name : "MIRROR", mem, static_cast<unsigned long long>(value),
+		CSRreg._u32, cpuRegs.pc, cpuRegs.GPR.n.ra.UL[0], cpuRegs.cycle);
+	++s_AmethystGSReadLogCount;
+}
+
+static bool AmethystIsDisplayRegister(u32 mem)
+{
+	switch (mem & ~0xf)
+	{
+		case GS_PMODE:
+		case GS_SMODE1:
+		case GS_SMODE2:
+		case GS_DISPFB1:
+		case GS_DISPLAY1:
+		case GS_DISPFB2:
+		case GS_DISPLAY2:
+			return true;
+		default:
+			return false;
+	}
+}
 
 void gsSetVideoMode(GS_VideoMode mode)
 {
@@ -25,6 +125,9 @@ void gsReset()
 	MTGS::ResetGS(true);
 	gsVideoMode = GS_VideoMode::Uninitialized;
 	std::memset(g_RealGSMem, 0, sizeof(g_RealGSMem));
+	s_GSRegistersWritten = false;
+	s_AmethystGSWriteLogCount = 0;
+	s_AmethystGSReadLogCount = 0;
 	UpdateVSyncRate(true);
 }
 
@@ -32,6 +135,8 @@ static __fi void gsCSRwrite( const tGS_CSR& csr )
 {
 	if (csr.RESET) {
 		GUNIT_WARN("GUNIT_WARN: csr.RESET");
+		if (AmethystGSRegDiagEnabled())
+			std::fprintf(stderr, "AMPS2 GSREG CSR reset pc=0x%08X cycle=%u\n", cpuRegs.pc, cpuRegs.cycle);
 		//Console.Warning( "csr.RESET" );
 		//gifUnit.Reset(true); // Don't think gif should be reset...
 		gifUnit.gsSIGNAL.queued = false;
@@ -91,9 +196,10 @@ static __fi void IMRwrite(u32 value)
 	GSIMR._u32 = (value & 0x1f00)|0x6000;
 }
 
-__fi void gsWrite8(u32 mem, u8 value)
-{
-	switch (mem)
+	__fi void gsWrite8(u32 mem, u8 value)
+	{
+		AmethystLogGSWrite(mem, value, 8);
+		switch (mem)
 	{
 		// CSR 8-bit write handlers.
 		// I'm quite sure these would just write the CSR portion with the other
@@ -122,9 +228,10 @@ __fi void gsWrite8(u32 mem, u8 value)
 //////////////////////////////////////////////////////////////////////////
 // GS Write 16 bit
 
-__fi void gsWrite16(u32 mem, u16 value)
-{
-	GIF_LOG("GS write 16 at %8.8lx with data %8.8lx", mem, value);
+	__fi void gsWrite16(u32 mem, u16 value)
+	{
+		AmethystLogGSWrite(mem, value, 16);
+		GIF_LOG("GS write 16 at %8.8lx with data %8.8lx", mem, value);
 
 	switch (mem)
 	{
@@ -150,10 +257,11 @@ __fi void gsWrite16(u32 mem, u16 value)
 //////////////////////////////////////////////////////////////////////////
 // GS Write 32 bit
 
-__fi void gsWrite32(u32 mem, u32 value)
-{
-	pxAssume( (mem & 3) == 0 );
-	GIF_LOG("GS write 32 at %8.8lx with data %8.8lx", mem, value);
+	__fi void gsWrite32(u32 mem, u32 value)
+	{
+		pxAssume( (mem & 3) == 0 );
+		AmethystLogGSWrite(mem, value, 32);
+		GIF_LOG("GS write 32 at %8.8lx with data %8.8lx", mem, value);
 
 	switch (mem)
 	{
@@ -181,7 +289,8 @@ void gsWrite64_generic( u32 mem, u64 value )
 
 void gsWrite64_page_00( u32 mem, u64 value )
 {
-	s_GSRegistersWritten |= (mem == GS_DISPFB1 || mem == GS_DISPFB2 || mem == GS_PMODE);
+	AmethystLogGSWrite(mem, value, 64);
+	s_GSRegistersWritten |= AmethystIsDisplayRegister(mem);
 	bool reqUpdate = false;
 	if (mem == GS_SMODE1 || mem == GS_SMODE2)
 	{
@@ -197,6 +306,7 @@ void gsWrite64_page_00( u32 mem, u64 value )
 
 void gsWrite64_page_01( u32 mem, u64 value )
 {
+	AmethystLogGSWrite(mem, value, 64);
 	GIF_LOG("GS Write64 at %8.8lx with data %8.8x_%8.8x", mem, (u32)(value >> 32), (u32)value);
 
 	switch( mem )
@@ -233,11 +343,16 @@ void gsWrite64_page_01( u32 mem, u64 value )
 
 void TAKES_R128 gsWrite128_page_00( u32 mem, r128 value )
 {
+	const u128 uvalue = r128_to_u128(value);
+	AmethystLogGSWrite(mem, (static_cast<u64>(uvalue._u32[1]) << 32) | uvalue._u32[0], 128);
+	s_GSRegistersWritten |= AmethystIsDisplayRegister(mem);
 	gsWrite128_generic( mem, value );
 }
 
 void TAKES_R128 gsWrite128_page_01( u32 mem, r128 value )
 {
+	const u128 uvalue = r128_to_u128(value);
+	AmethystLogGSWrite(mem, (static_cast<u64>(uvalue._u32[1]) << 32) | uvalue._u32[0], 128);
 	switch( mem )
 	{
 		case GS_CSR:
@@ -264,38 +379,50 @@ void TAKES_R128 gsWrite128_generic( u32 mem, r128 value )
 __fi u8 gsRead8(u32 mem)
 {
 	GIF_LOG("GS read 8 from %8.8lx  value: %8.8lx", mem, *(u8*)PS2GS_BASE(mem));
+	const auto finish = [&](u8 value) {
+		AmethystLogGSRead(mem, value, 8);
+		return value;
+	};
 
 	switch (mem & ~0xF)
 	{
 		case GS_SIGLBLID:
-			return *(u8*)PS2GS_BASE(mem);
+			return finish(*(u8*)PS2GS_BASE(mem));
 		default: // Only SIGLBLID and CSR are readable, everything else mirrors CSR
-			return *(u8*)PS2GS_BASE(GS_CSR + (mem & 0xF));
+			return finish(*(u8*)PS2GS_BASE(GS_CSR + (mem & 0xF)));
 	}
 }
 
 __fi u16 gsRead16(u32 mem)
 {
 	GIF_LOG("GS read 16 from %8.8lx  value: %8.8lx", mem, *(u16*)PS2GS_BASE(mem));
+	const auto finish = [&](u16 value) {
+		AmethystLogGSRead(mem, value, 16);
+		return value;
+	};
 	switch (mem & ~0xF)
 	{
 		case GS_SIGLBLID:
-			return *(u16*)PS2GS_BASE(mem);
+			return finish(*(u16*)PS2GS_BASE(mem));
 		default: // Only SIGLBLID and CSR are readable, everything else mirrors CSR
-			return *(u16*)PS2GS_BASE(GS_CSR + (mem & 0x7));
+			return finish(*(u16*)PS2GS_BASE(GS_CSR + (mem & 0x7)));
 	}
 }
 
 __fi u32 gsRead32(u32 mem)
 {
 	GIF_LOG("GS read 32 from %8.8lx  value: %8.8lx", mem, *(u32*)PS2GS_BASE(mem));
+	const auto finish = [&](u32 value) {
+		AmethystLogGSRead(mem, value, 32);
+		return value;
+	};
 
 	switch (mem & ~0xF)
 	{
 		case GS_SIGLBLID:
-			return *(u32*)PS2GS_BASE(mem);
+			return finish(*(u32*)PS2GS_BASE(mem));
 		default: // Only SIGLBLID and CSR are readable, everything else mirrors CSR
-			return *(u32*)PS2GS_BASE(GS_CSR + (mem & 0xC));
+			return finish(*(u32*)PS2GS_BASE(GS_CSR + (mem & 0xC)));
 	}
 }
 
@@ -303,13 +430,17 @@ __fi u64 gsRead64(u32 mem)
 {
 	// fixme - PS2GS_BASE(mem+4) = (g_RealGSMem+(mem + 4 & 0x13ff))
 	GIF_LOG("GS read 64 from %8.8lx  value: %8.8lx_%8.8lx", mem, *(u32*)PS2GS_BASE(mem+4), *(u32*)PS2GS_BASE(mem) );
+	const auto finish = [&](u64 value) {
+		AmethystLogGSRead(mem, value, 64);
+		return value;
+	};
 
 	switch (mem & ~0xF)
 	{
 		case GS_SIGLBLID:
-			return *(u64*)PS2GS_BASE(mem);
+			return finish(*(u64*)PS2GS_BASE(mem));
 		default: // Only SIGLBLID and CSR are readable, everything else mirrors CSR
-			return *(u64*)PS2GS_BASE(GS_CSR + (mem & 0x8));
+			return finish(*(u64*)PS2GS_BASE(GS_CSR + (mem & 0x8)));
 	}
 }
 
@@ -340,4 +471,3 @@ bool SaveStateBase::gsFreeze()
 	Freeze(gsVideoMode);
 	return IsOkay();
 }
-
